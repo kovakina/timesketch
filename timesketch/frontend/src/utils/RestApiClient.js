@@ -26,6 +26,16 @@ const RestApiClient = axios.create({
   }
 })
 
+const RestApiBlobClient = axios.create({
+  baseURL: '/api/v1',
+  responseType: 'blob',
+  headers: {
+    common: {
+      'X-CSRFToken': document.getElementsByTagName('meta')[0]['content']
+    }
+  }
+})
+
 // Show message on errors.
 RestApiClient.interceptors.response.use(function (response) {
   return response;
@@ -60,6 +70,24 @@ export default {
   },
   deleteSketch (sketchId) {
     return RestApiClient.delete('/sketches/' + sketchId + '/')
+  },
+  archiveSketch (sketchId) {
+    let formData = {
+      action: 'archive'
+    }
+    return RestApiClient.post('/sketches/' + sketchId + '/archive/', formData)
+  },
+  unArchiveSketch (sketchId) {
+    let formData = {
+      action: 'unarchive'
+    }
+    return RestApiClient.post('/sketches/' + sketchId + '/archive/', formData)
+  },
+  exportSketch (sketchId) {
+    let formData = {
+      action: 'export'
+    }
+    return RestApiBlobClient.post('/sketches/' + sketchId + '/archive/', formData)
   },
   getSketchTimelines (sketchId) {
     return RestApiClient.get('/sketches/' + sketchId + '/timelines/')
@@ -109,11 +137,12 @@ export default {
     }
     return RestApiClient.get('/sketches/' + sketchId + '/event/', params)
   },
-  saveEventAnnotation (sketchId, annotationType, annotation, events) {
+  saveEventAnnotation (sketchId, annotationType, annotation, events, remove=false) {
     let formData = {
       annotation: annotation,
       annotation_type: annotationType,
       events: events,
+      remove: remove
     }
     return RestApiClient.post('/sketches/' + sketchId + '/event/annotate/', formData)
   },
@@ -138,6 +167,9 @@ export default {
     }
     return RestApiClient.post('/sketches/' + sketchId + /stories/ + storyId + '/', formData)
   },
+  deleteStory (sketchId, storyId) {
+  	return RestApiClient.delete('/sketches/' + sketchId + /stories/ + storyId + '/')
+  },
   // Saved views
   getView (sketchId, viewId) {
     return RestApiClient.get('/sketches/' + sketchId + '/views/' + viewId + '/')
@@ -151,6 +183,13 @@ export default {
     }
     return RestApiClient.post('/sketches/' + sketchId + /views/, formData)
   },
+  updateView (sketchId, viewId, queryString, queryFilter) {
+    let formData = {
+      query: queryString,
+      filter: queryFilter,
+    }
+    return RestApiClient.post('/sketches/' + sketchId + /views/ + viewId + '/', formData)
+  },
   deleteView (sketchId, viewId) {
     return RestApiClient.delete('/sketches/' + sketchId + '/views/' + viewId + '/')
   },
@@ -158,8 +197,30 @@ export default {
   search (sketchId, formData) {
     return RestApiClient.post('/sketches/' + sketchId + '/explore/', formData)
   },
+  exportSearchResult (sketchId, formData) {
+    return RestApiBlobClient.post('/sketches/' + sketchId + '/explore/', formData)
+  },
+  getAggregations (sketchId) {
+    return RestApiClient.get('/sketches/' + sketchId + '/aggregation/')
+  },
+  getAggregationGroups (sketchId) {
+    return RestApiClient.get('/sketches/' + sketchId + '/aggregation/group/')
+  },
   runAggregator (sketchId, formData) {
     return RestApiClient.post('/sketches/' + sketchId + '/aggregation/explore/', formData)
+  },
+  runAggregatorGroup (sketchId, groupId) {
+    return RestApiClient.get('/sketches/' + sketchId + '/aggregation/group/' + groupId + '/')
+  },
+  saveAggregation (sketchId, aggregation, name, formData) {
+    let form_data = {
+      'name': name,
+      'description': aggregation.description,
+      'agg_type': aggregation.name,
+      'chart_type': formData['supported_charts'],
+      'parameters': formData
+    }
+    return RestApiClient.post('/sketches/' + sketchId + '/aggregation/', form_data)
   },
   // Misc resources
   countSketchEvents (sketchId) {
@@ -196,5 +257,8 @@ export default {
   },
   getAnalyzerSession (sketchId, sessionId) {
     return RestApiClient.get('/sketches/' + sketchId + '/analyzer/sessions/' + sessionId + '/')
+  },
+  getLoggedInUser () {
+    return RestApiClient.get('/users/me/')
   }
 }

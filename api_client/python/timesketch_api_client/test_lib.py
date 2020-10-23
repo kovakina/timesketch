@@ -14,6 +14,8 @@
 """Tests for the Timesketch API client"""
 from __future__ import unicode_literals
 
+import json
+
 
 def mock_session():
     """Mock HTTP requests session."""
@@ -70,6 +72,13 @@ def mock_response(*args, **kwargs):
             return self.json_data
 
     auth_text_data = '<input id="csrf_token" name="csrf_token" value="test">'
+
+    archive_data = {
+        'is_archived': False,
+        'sketch_id': 1,
+        'sketch_name': 'test',
+    }
+
     sketch_data = {
         'meta': {
             'views': [{
@@ -104,7 +113,7 @@ def mock_response(*args, **kwargs):
 
     sketch_list_data = {
         'meta': {'es_time': 324},
-        'objects': [sketch_data['objects']]}
+        'objects': sketch_data['objects']}
 
     timeline_data = {
         'meta': {
@@ -124,6 +133,49 @@ def mock_response(*args, **kwargs):
         'objects': []
     }
 
+    story_list_data = {
+        'meta': {'es_time': 23},
+        'objects': [[{'id': 1}]]
+    }
+
+    story_data = {
+        'meta': {
+            'es_time': 1,
+        },
+        'objects': [{
+            'title': 'My First Story',
+            'content': json.dumps([
+                {
+                    'componentName': '',
+                    'componentProps': {},
+                    'content': '# My Heading\nWith Some Text.',
+                    'edit': False,
+                    'showPanel': False,
+                    'isActive': False
+                },
+                {
+                    'componentName': 'TsViewEventList',
+                    'componentProps': {
+                        'view': {
+                            'id': 1,
+                            'name': 'Smoking Gun'}},
+                    'content': '',
+                    'edit': False,
+                    'showPanel': False,
+                    'isActive': False
+                },
+                {
+                    'componentName': '',
+                    'componentProps': {},
+                    'content': '... and that was the true crime.',
+                    'edit': False,
+                    'showPanel': False,
+                    'isActive': False
+                }
+            ])
+        }]
+    }
+
     # Register API endpoints to the correct mock response data.
     url_router = {
         'http://127.0.0.1':
@@ -136,8 +188,15 @@ def mock_response(*args, **kwargs):
         MockResponse(json_data=timeline_data),
         'http://127.0.0.1/api/v1/sketches/1/explore/':
         MockResponse(json_data=timeline_data),
+        'http://127.0.0.1/api/v1/sketches/1/stories/':
+        MockResponse(json_data=story_list_data),
+        'http://127.0.0.1/api/v1/sketches/1/stories/1/':
+        MockResponse(json_data=story_data),
+        'http://127.0.0.1/api/v1/sketches/1/archive/':
+        MockResponse(json_data=archive_data),
     }
 
     if kwargs.get('empty', False):
         return MockResponse(text_data=empty_data)
+
     return url_router.get(args[0], MockResponse(None, 404))

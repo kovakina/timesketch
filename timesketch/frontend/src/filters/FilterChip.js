@@ -16,11 +16,11 @@ limitations under the License.
 export default {
   name: 'filterChip',
   filter: function (input) {
-    if (input.operator === 'must_not') {
-      return 'NOT ' + input.field + ':' + input.value
-    } else if (input.type === 'label') {
+    if (input.type === 'label') {
       if (input.value === '__ts_star') {
         return 'Starred'
+      } else if (input.value === '__ts_comment') {
+        return 'Commented'
       }
       return input.value
     }

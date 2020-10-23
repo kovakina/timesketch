@@ -20,14 +20,19 @@ limitations under the License.
         <router-link :to="{ name: 'SketchExplore', query: {view: view.id}}"><strong>{{ view.name }}</strong></router-link>
         <br>
         <span v-if="!controls" class="is-size-7">
-          Created {{ view.created_at | moment("YYYY-MM-DD HH:mm") }}
+          Created {{ view.created_at | moment("YYYY-MM-DD HH:mm") }} <span v-if="view.user"> by {{ view.user }}</span> <span v-if="view.description"> ({{ view.description }})</span>
         </span>
         <span v-if="controls" class="is-size-7">
           <b>Query:</b> {{ view.query }}
         </span>
         <div v-if="controls" class="field is-grouped is-pulled-right" style="margin-top: -15px;">
           <p class="control">
-            <button v-on:click="remove(view, index)" class="button is-small is-rounded is-danger is-outlined">Remove</button>
+            <button v-on:click="remove(view, index)" class="button is-small is-rounded is-danger">
+              <span class="icon is-small">
+                <i class="fas fa-trash"></i>
+              </span>
+              <span>Remove</span>
+            </button>
           </p>
         </div>
       </li>

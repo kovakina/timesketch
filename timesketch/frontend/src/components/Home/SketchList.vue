@@ -15,44 +15,69 @@ limitations under the License.
 -->
 <template>
   <div>
-    <ul class="content-list">
-      <li style="padding:15px;" v-for="sketch in sketches" :key="sketch.id">
-        <div class="is-pulled-right" style="margin-top:10px;">
-          <span class="is-size-7">{{ sketch.user.username }}</span>
+    <b-table
+      :data="sketches"
+      :per-page="perPage"
+      paginated
+      pagination-simple
+      pagination-position="bottom"
+      default-sort-direction="desc"
+      icon-pack="fas"
+      icon-prev="chevron-left"
+      icon-next="chevron-right">
+      <template slot-scope="props">
+        <b-table-column field="name" label="Name">
+          <router-link :to="{ name: 'SketchOverview', params: {sketchId: props.row.id } }"><strong>{{ props.row.name }}</strong></router-link>
+        </b-table-column>
+        <b-table-column field="status">
+          <span v-if="props.row.status === 'archived'">
+            <b-tag>{{ props.row.status }}</b-tag>
+          </span>
+        </b-table-column>
+        <b-table-column field="user" label="Created by" width="200">
+          {{ props.row.user }}
+        </b-table-column>
+        <b-table-column field="updated_at" label="Last activity" width="200">
+          {{ new Date(props.row.updated_at) | moment("YYYY-MM-DD HH:mm") }}
+        </b-table-column>
+      </template>
+
+      <template slot="bottom-left">
+        <div class="has-text-right">
+          <div class="level" >
+            <div class="level-left" style="margin-right: 10px;">
+              Rows per page:
+            </div>
+            <div class="level-right">
+              <b-select class="is-pulled-left" placeholder="Rows per page" v-model="perPage" size="is-small">
+                <option v-bind:value="perPage">{{ perPage }}</option>
+                <option value="20">20</option>
+                <option value="40">40</option>
+                <option value="80">80</option>
+                <option value="100">100</option>
+                <option value="200">200</option>
+                <option value="500">500</option>
+              </b-select>
+            </div>
+          </div>
         </div>
-        <div>
-          <router-link :to="{ name: 'SketchOverview', params: {sketchId: sketch.id } }"><strong>{{ sketch.name }}</strong></router-link>
-          <br>
-          <span class="is-size-7">Last activity {{ sketch.updated_at }}</span>
-        </div>
-      </li>
-    </ul>
+      </template>
+
+    </b-table>
   </div>
+
 </template>
 
 <script>
 export default {
-  props: ['sketches']
+  props: ['sketches'],
+  data () {
+    return {
+      perPage: 20
+    }
+  },
 }
 </script>
 
 <!-- CSS scoped to this component only -->
-<style scoped lang="scss">
-  ul.content-list {
-      list-style: none;
-  }
-
-  ul.content-list>li {
-      padding-top: 15px;
-      padding-bottom: 15px;
-      border-bottom: 1px solid #eee;
-      display: block;
-      margin: 0;
-  }
-
-  ul.content-list>li:hover {
-      background: #fcfcfc;
-  }
-
-  ul.content-list>li:last-child { border-bottom: none; }
-</style>
+<style scoped lang="scss"></style>

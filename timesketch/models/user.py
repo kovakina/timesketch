@@ -52,6 +52,7 @@ class User(UserMixin, BaseModel):
     name = Column(Unicode(255))
     email = Column(Unicode(255))
     active = Column(Boolean(), default=True)
+    admin = Column(Boolean(), default=False)
     sketches = relationship('Sketch', backref='user', lazy='dynamic')
     searchindices = relationship(
         'SearchIndex', backref='user', lazy='dynamic')
@@ -59,6 +60,8 @@ class User(UserMixin, BaseModel):
     views = relationship('View', backref='user', lazy='dynamic')
     stories = relationship('Story', backref='user', lazy='dynamic')
     aggregations = relationship('Aggregation', backref='user', lazy='dynamic')
+    aggregationgroups = relationship(
+        'AggregationGroup', backref='user', lazy='dynamic')
     my_groups = relationship('Group', backref='user', lazy='dynamic')
     groups = relationship(
         'Group',

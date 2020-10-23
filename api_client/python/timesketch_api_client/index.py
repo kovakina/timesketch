@@ -14,7 +14,14 @@
 """Timesketch API client library."""
 from __future__ import unicode_literals
 
+import json
+import logging
+
+from . import error
 from . import resource
+
+
+logger = logging.getLogger('timesketch_api.index')
 
 
 class SearchIndex(resource.BaseResource):
@@ -33,10 +40,38 @@ class SearchIndex(resource.BaseResource):
             searchindex_name: Name of the searchindex (optional).
         """
         self.id = searchindex_id
+        self._labels = []
         self._searchindex_name = searchindex_name
         self._resource_uri = 'searchindices/{0:d}'.format(self.id)
         super(SearchIndex, self).__init__(
             api=api, resource_uri=self._resource_uri)
+
+    def _get_object_dict(self):
+        """Returns the object dict from the resources dict."""
+        data = self.lazyload_data()
+        objects = data.get('objects', [])
+        if not objects:
+            return {}
+
+        return objects[0]
+
+    @property
+    def labels(self):
+        """Property that returns the SearchIndex labels."""
+        if self._labels:
+            return self._labels
+
+        index_data = self._get_object_dict()
+        if not index_data:
+            return self._labels
+
+        label_string = index_data.get('label_string', '')
+        if label_string:
+            self._labels = json.loads(label_string)
+        else:
+            self._labels = []
+
+        return self._labels
 
     @property
     def name(self):
@@ -46,8 +81,8 @@ class SearchIndex(resource.BaseResource):
             Searchindex name as string.
         """
         if not self._searchindex_name:
-            searchindex = self.lazyload_data()
-            self._searchindex_name = searchindex['objects'][0]['name']
+            index_data = self._get_object_dict()
+            self._searchindex_name = index_data.get('name', 'no name defined')
         return self._searchindex_name
 
     @property
@@ -57,5 +92,33 @@ class SearchIndex(resource.BaseResource):
         Returns:
             Elasticsearch index name as string.
         """
-        searchindex = self.lazyload_data()
-        return searchindex['objects'][0]['index_name']
+        index_data = self._get_object_dict()
+        return index_data.get('index_name', 'unkown index name')
+
+    @property
+    def status(self):
+        """Property that returns the index status.
+
+        Returns:
+            String with the index status.
+        """
+        index_data = self._get_object_dict()
+        status_list = index_data.get('status')
+        if not status_list:
+            return 'Unknown'
+
+        status = status_list[0]
+        return status.get('status')
+
+    @property
+    def description(self):
+        """Property that returns the description of the index."""
+        index_data = self._get_object_dict()
+        return index_data.get('description', 'no description provided')
+
+    def delete(self):
+        """Deletes the index."""
+        resource_url = '{0:s}/searchindices/{1:d}/'.format(
+            self.api.api_root, self.id)
+        response = self.api.session.delete(resource_url)
+        return error.check_return_status(response, logger)

@@ -18,6 +18,7 @@ from __future__ import unicode_literals
 import codecs
 import os
 import pwd
+import re
 import sys
 import uuid
 import yaml
@@ -25,6 +26,8 @@ import yaml
 import six
 
 from flask import current_app
+from werkzeug.exceptions import Forbidden
+
 from flask_migrate import MigrateCommand
 from flask_script import Command
 from flask_script import Manager
@@ -33,9 +36,9 @@ from flask_script import Option
 from flask_script import prompt_bool
 from flask_script import prompt_pass
 from sqlalchemy.exc import IntegrityError
-from werkzeug.exceptions import Forbidden
 
-from timesketch import create_app
+from timesketch import version
+from timesketch.app import create_app
 from timesketch.lib.datastores.elastic import ElasticsearchDataStore
 from timesketch.models import db_session
 from timesketch.models import drop_all
@@ -45,6 +48,16 @@ from timesketch.models.sketch import SearchIndex
 from timesketch.models.sketch import SearchTemplate
 from timesketch.models.sketch import Sketch
 from timesketch.models.sketch import Timeline
+
+
+class GetVersion(Command):
+    """Returns the version information of Timesketch."""
+
+    # pylint: disable=method-hidden
+    def run(self):
+        """Return the version information of Timesketch."""
+        return 'Timesketch version: {0:s}'.format(
+            version.get_version())
 
 
 class DropDataBaseTables(Command):
@@ -91,6 +104,49 @@ class AddUser(Command):
         sys.stdout.write('User {0:s} created/updated\n'.format(username))
 
 
+class MakeUserAdmin(Command):
+    """Make user into an administrator."""
+    option_list = (
+        Option('--username', '-u', dest='username', required=True),
+        Option(
+            '--remove', '-r', dest='remove', action='store_true',
+            required=False, default=False),
+    )
+
+    # pylint: disable=arguments-differ, method-hidden
+    def run(self, username, remove):
+        """Adds the admin bit to a user."""
+        user = User.query.filter_by(username=username).first()
+
+        if not user:
+            sys.stdout.write('User [{0:s}] does not exist.\n'.format(
+                username))
+            return
+        user.admin = not remove
+        db_session.add(user)
+        db_session.commit()
+
+        if remove:
+            sys.stdout.write('User {0:s} is no longer an admin.\n'.format(
+                username))
+        else:
+            sys.stdout.write('User {0:s} is now an admin.\n'.format(username))
+
+
+class ListUsers(Command):
+    """List all users."""
+
+    # pylint: disable=arguments-differ, method-hidden
+    def run(self):
+        """The run method for the command."""
+        for user in User.query.all():
+            if user.admin:
+                extra = ' (admin)'
+            else:
+                extra = ''
+            print('{0:s}{1:s}'.format(user.username, extra))
+
+
 class AddGroup(Command):
     """Create a new Timesketch group."""
     option_list = (Option('--name', '-n', dest='name', required=True), )
@@ -106,6 +162,16 @@ class AddGroup(Command):
         sys.stdout.write('Group {0:s} created\n'.format(name))
 
 
+class ListGroups(Command):
+    """List all groups."""
+
+    # pylint: disable=arguments-differ, method-hidden
+    def run(self):
+        """The run method for the command."""
+        for group in Group.query.all():
+            print(group.name)
+
+
 class GroupManager(Command):
     """Manage group memberships."""
     option_list = (
@@ -116,23 +182,38 @@ class GroupManager(Command):
             action='store_true',
             required=False,
             default=False),
+        Option(
+            '--expand',
+            dest='expand',
+            action='store_true',
+            required=False,
+            default=False),
         Option('--group', '-g', dest='group_name', required=True),
-        Option('--user', '-u', dest='user_name', required=True), )
+        Option('--user', '-u', dest='user_name', required=False, default=None)
+    )
 
     # pylint: disable=arguments-differ, method-hidden
-    def run(self, remove, group_name, user_name):
+    def run(self, remove, expand, group_name, user_name):
         """Add the user to the group."""
         if not isinstance(group_name, six.text_type):
             group_name = codecs.decode(group_name, 'utf-8')
 
+        group = Group.query.filter_by(name=group_name).first()
+
+        # List all members of a group and then exit.
+        if expand:
+            for _user in group.users:
+                print(_user.username)
+            return
+
         if not isinstance(user_name, six.text_type):
             user_name = codecs.decode(user_name, 'utf-8')
-
-        group = Group.query.filter_by(name=group_name).first()
-        user = User.query.filter_by(username=user_name).first()
+        user = None
+        if user_name:
+            user = User.query.filter_by(username=user_name).first()
 
         # Add or remove user from group
-        if remove:
+        if remove and user:
             try:
                 user.groups.remove(group)
                 sys.stdout.write('{0:s} removed from group {1:s}\n'.format(
@@ -141,7 +222,7 @@ class GroupManager(Command):
             except ValueError:
                 sys.stdout.write('{0:s} is not a member of group {1:s}\n'.
                                  format(user_name, group_name))
-        else:
+        elif user:
             user.groups.append(group)
             try:
                 db_session.commit()
@@ -326,8 +407,17 @@ class ListSketches(Command):
         print(' ID | Name {0:s} | Description'.format(' '*(name_len-5)))
         print('+-'*40)
         for sketch in sketches:
+            status = sketch.get_status.status
+            if status == 'deleted':
+                continue
+
+            if status == 'archived':
+                name = '{0:s} (archived)'.format(sketch.name)
+            else:
+                name = sketch.name
+
             print(fmt_string.format(
-                sketch.id, sketch.name, sketch.description))
+                sketch.id, name, sketch.description))
             print('-'*80)
 
 
@@ -340,6 +430,8 @@ class ImportTimeline(Command):
         Option('--timeline_name', '-n', dest='timeline_name',
                required=False),
     )
+
+    FILENAME_RE = re.compile(r'(^\d+)_.+\.(plaso|csv|jsonl)')
 
     # pylint: disable=arguments-differ, method-hidden
     def run(self, file_path, sketch_id, username, timeline_name):
@@ -374,11 +466,18 @@ class ImportTimeline(Command):
         sketch = None
         # If filename starts with <number> then use that as sketch_id.
         # E.g: 42_file_name.plaso means sketch_id is 42.
-        sketch_id_from_filename = filename.split('_')[0]
+        file_match = self.FILENAME_RE.match(filename)
+        if file_match:
+            sketch_id_from_filename = file_match.groups()[0]
+        else:
+            sketch_id_from_filename = ''
+
         if not sketch_id and sketch_id_from_filename.isdigit():
             sketch_id = sketch_id_from_filename
 
         if sketch_id:
+            if not sketch_id.isdigit():
+                sys.exit('Sketch ID needs to be a number, not a string.')
             try:
                 sketch = Sketch.query.get_with_acl(sketch_id, user=user)
             except Forbidden:
@@ -444,9 +543,12 @@ class ImportTimeline(Command):
 
         # Start Celery pipeline for indexing and analysis.
         # Import here to avoid circular imports.
-        from timesketch.lib import tasks  # pylint: disable=import-outside-toplevel
+        # pylint: disable=import-outside-toplevel
+        from timesketch.lib import tasks
         pipeline = tasks.build_index_pipeline(
-            file_path, timeline_name, index_name, extension, sketch.id)
+            file_path=file_path, events='', timeline_name=timeline_name,
+            index_name=index_name, file_extension=extension,
+            sketch_id=sketch.id)
         pipeline.apply_async(task_id=index_name)
 
         print('Imported {0:s} to sketch: {1:d} ({2:s})'.format(
@@ -454,10 +556,14 @@ class ImportTimeline(Command):
 
 
 def main():
+    """Main function of the script, setting up the shell manager."""
     # Setup Flask-script command manager and register commands.
     shell_manager = Manager(create_app)
     shell_manager.add_command('add_user', AddUser())
+    shell_manager.add_command('make_admin', MakeUserAdmin())
+    shell_manager.add_command('list_users', ListUsers())
     shell_manager.add_command('add_group', AddGroup())
+    shell_manager.add_command('list_groups', ListGroups)
     shell_manager.add_command('manage_group', GroupManager())
     shell_manager.add_command('add_index', AddSearchIndex())
     shell_manager.add_command('db', MigrateCommand)
@@ -466,6 +572,7 @@ def main():
     shell_manager.add_command('purge', PurgeTimeline())
     shell_manager.add_command('search_template', SearchTemplateManager())
     shell_manager.add_command('import', ImportTimeline())
+    shell_manager.add_command('version', GetVersion())
     shell_manager.add_command('runserver',
                               Server(host='127.0.0.1', port=5000))
     shell_manager.add_option(

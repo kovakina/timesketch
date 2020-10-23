@@ -14,8 +14,11 @@
 
 from __future__ import unicode_literals
 
-import csv
+import codecs
 import collections
+import csv
+import json
+import logging
 import os
 import traceback
 import uuid
@@ -25,11 +28,48 @@ import pandas
 from timesketch.lib import definitions
 
 
+logger = logging.getLogger('test_tool.analyzer_run')
+
+
 # Define named tuples to track changes made to events and sketches.
 EVENT_CHANGE = collections.namedtuple('event_change', 'type, source, what')
 SKETCH_CHANGE = collections.namedtuple('sketch_change', 'type, source, what')
 
 VIEW_OBJECT = collections.namedtuple('view', 'id, name')
+AGG_OBJECT = collections.namedtuple('aggregation', 'id, name parameters')
+
+
+def get_config_path(file_name):
+    """Returns a path to a configuration file.
+
+    Args:
+        file_name: String that defines the config file name.
+
+    Returns:
+        The path to the configuration file or an empty string if the file
+        cannot be found.
+    """
+    path = os.path.join('etc', 'timesketch', file_name)
+    if os.path.isfile(path):
+        return os.path.abspath(path)
+
+    path = os.path.join('data', file_name)
+    if os.path.isfile(path):
+        return os.path.abspath(path)
+
+    path = os.path.join(
+        os.path.dirname(__file__), '..', 'data', file_name)
+    path = os.path.abspath(path)
+    if os.path.isfile(path):
+        return path
+
+    path = os.path.join(
+        os.path.dirname(__file__), '..', '..', '..', '..', 'data', file_name)
+    path = os.path.abspath(path)
+    if os.path.isfile(path):
+        return path
+
+    return ''
 
 
 class AnalyzerContext(object):
@@ -41,6 +81,7 @@ class AnalyzerContext(object):
         self.analyzer_result = ''
         self.error = None
         self.event_cache = {}
+        self.failed = False
         self.sketch = None
         self.queries = []
 
@@ -61,6 +102,9 @@ class AnalyzerContext(object):
             return_strings.append('  -- Query #{0:02d} --'.format(qid+1))
             for key, value in query.items():
                 return_strings.append('{0:>20s}: {1!s}'.format(key, value))
+
+        if self.failed:
+            return '\n'.join(return_strings)
 
         if self.sketch and self.sketch.updates:
             return_strings.append('')
@@ -344,7 +388,7 @@ class Sketch(object):
 
     def add_aggregation(
             self, name, agg_name, agg_params, description='', view_id=None,
-            chart_type=None):
+            chart_type=None, label=''):
         """Add aggregation to the sketch.
 
         Args:
@@ -355,6 +399,7 @@ class Sketch(object):
                 this is optional.
             view_id: optional ID of the view to attach the aggregation to.
             chart_type: string representing the chart type.
+            label: string with a label to attach to the aggregation.
         """
         if not agg_name:
             raise ValueError('Aggregator name needs to be defined.')
@@ -368,12 +413,43 @@ class Sketch(object):
             'description': description,
             'view_id': view_id,
             'chart_type': chart_type,
+            'label': label
         }
         change = SKETCH_CHANGE('ADD', 'aggregation', params)
         self.updates.append(change)
 
+        agg_obj = AGG_OBJECT(1, name, agg_params)
+        return agg_obj
+
+    def add_aggregation_group(self, name, description='', view_id=None):
+        """Add aggregation Group to the sketch.
+
+        Args:
+            name: the name of the aggregation run.
+            description: optional description of the aggregation, visible in
+                the UI.
+            view_id: optional ID of the view to attach the aggregation to.
+        """
+        if not name:
+            raise ValueError('Aggregator group name needs to be defined.')
+
+        if not description:
+            description = 'Created by an analyzer'
+
+        params = {
+            'name': name,
+            'description': description,
+            'view_id': view_id
+        }
+        change = SKETCH_CHANGE('ADD', 'aggregation_group', params)
+        self.updates.append(change)
+
+        return AggregationGroup(
+            analyzer=self, name=name, description=description, user=None,
+            sketch=self.id, view=view_id)
+
     def add_view(self, view_name, analyzer_name, query_string=None,
-                 query_dsl=None, query_filter=None):
+                 query_dsl=None, query_filter=None, additional_fields=None):
         """Add saved view to the Sketch.
 
         Args:
@@ -382,6 +458,8 @@ class Sketch(object):
             query_string: Elasticsearch query string.
             query_dsl: Dictionary with Elasticsearch DSL query.
             query_filter: Dictionary with Elasticsearch filters.
+            additional_fields: A list with field names to include in the
+                view output.
 
         Raises:
             ValueError: If both query_string an query_dsl are missing.
@@ -400,12 +478,34 @@ class Sketch(object):
             'query_string': query_string,
             'query_dsl': query_dsl,
             'query_filter': query_filter,
+            'additional_fields': additional_fields,
         }
         change = SKETCH_CHANGE('ADD', 'view', params)
         self.updates.append(change)
 
         view = VIEW_OBJECT(1, name)
         return view
+
+    def add_story(self, title):
+        """Add a story to the Sketch.
+
+        Args:
+            title: The name of the view.
+
+        Raises:
+            ValueError: If both query_string an query_dsl are missing.
+
+        Returns:
+            An instance of a Story object.
+        """
+        params = {
+            'title': title,
+        }
+        change = SKETCH_CHANGE('ADD', 'story', params)
+        self.updates.append(change)
+
+        story = Story(self, title=title)
+        return story
 
     def get_all_indices(self):
         """List all indices in the Sketch.
@@ -503,13 +603,33 @@ class BaseIndexAnalyzer(object):
                 query_string=query_string, query_dsl=query_dsl,
                 indices=indices, fields=return_fields)
 
-        with open(self._file_name) as csv_fh:
-            reader = csv.DictReader(csv_fh)
-            for row in reader:
-                event = Event(row, sketch=self.sketch, context=self._context)
-                if self._context:
-                    self._context.add_event(event)
-                yield event
+        _, _, file_extension = self._file_name.rpartition('.')
+        file_extension = file_extension.lower()
+        if file_extension not in ['csv', 'jsonl']:
+            raise ValueError(
+                'Unable to parse the test file [{0:s}] unless it has the '
+                'extension of either .csv or .jsonl'.format(self._file_name))
+
+        with codecs.open(
+                self._file_name, encoding='utf-8', errors='replace') as fh:
+
+            if file_extension == 'csv':
+                reader = csv.DictReader(fh)
+                for row in reader:
+                    event = Event(
+                        row, sketch=self.sketch, context=self._context)
+                    if self._context:
+                        self._context.add_event(event)
+                    yield event
+            elif file_extension == 'jsonl':
+                for row in fh:
+                    event = Event(
+                        json.loads(row), sketch=self.sketch,
+                        context=self._context)
+                    if self._context:
+                        self._context.add_event(event)
+                    yield event
+
 
     def run_wrapper(self):
         """A wrapper method to run the analyzer.
@@ -524,6 +644,11 @@ class BaseIndexAnalyzer(object):
         except Exception:  # pylint: disable=broad-except
             if self._context:
                 self._context.error = traceback.format_exc()
+            logger.error(
+                'Unable to run the analyzer.\nMake sure the test data '
+                'contains all the necessary information to run.'
+                '\n\nThe traceback for the execution is:\n\n', exc_info=True)
+            self._context.failed = True
             return
 
         # Update database analysis object with result and status
@@ -627,3 +752,187 @@ class BaseSketchAnalyzer(BaseIndexAnalyzer):
     def run(self):
         """Entry point for the analyzer."""
         raise NotImplementedError
+
+
+class Story(object):
+    """Mocked story object."""
+
+    def __init__(self, analyzer, title):
+        """Initialize the story."""
+        self.id = 1
+        self.title = title
+        self._analyzer = analyzer
+
+    def add_aggregation(self, aggregation, agg_type=''):
+        """Add a saved aggregation to the Story.
+
+        Args:
+            aggregation (Aggregation): Saved aggregation to add to the story.
+            agg_type (str): string indicating the type of aggregation, can be:
+                "table" or the name of the chart to be used, eg "barcharct",
+                "hbarchart".
+        """
+        parameter_dict = aggregation.parameters
+        if agg_type:
+            parameter_dict['supported_charts'] = agg_type
+        else:
+            agg_type = parameter_dict.get('supported_charts')
+            # Neither agg_type nor supported_charts is set.
+            if not agg_type:
+                agg_type = 'table'
+                parameter_dict['supported_charts'] = 'table'
+
+        params = {
+            'agg_id': aggregation.id,
+            'agg_name': aggregation.name,
+            'agg_type': agg_type,
+            'agg_params': parameter_dict,
+        }
+        change = SKETCH_CHANGE('STORY_ADD', 'aggregation', params)
+        self._analyzer.updates.append(change)
+
+    def add_aggregation_group(self, aggregation_group):
+        """Add an aggregation group to the Story.
+
+        Args:
+            aggregation_group (SQLAggregationGroup): Save aggregation group
+                to add to the story.
+        """
+        if not isinstance(aggregation_group, AggregationGroup):
+            return
+
+        params = {
+            'group_id': aggregation_group.id,
+            'group_name': aggregation_group.name
+        }
+        change = SKETCH_CHANGE('STORY_ADD', 'aggregation_group', params)
+        self._analyzer.updates.append(change)
+
+    def add_text(self, text, skip_if_exists=False):
+        """Add a text block to the Story.
+
+        Args:
+            text (str): text (markdown is supported) to add to the story.
+            skip_if_already_there (boolean): if set to True then the text
+                will not be added if a block with this text already exists.
+        """
+        params = {
+            'text': text,
+            'skip_if_exists': skip_if_exists,
+        }
+        change = SKETCH_CHANGE('STORY_ADD', 'text', params)
+        self._analyzer.updates.append(change)
+
+    def add_view(self, view):
+        """Add a saved view to the story.
+
+        Args:
+            view (View): Saved view to add to the story.
+        """
+        params = {
+            'view_id': view.id,
+            'view_name': view.name
+        }
+        change = SKETCH_CHANGE('STORY_ADD', 'view', params)
+        self._analyzer.updates.append(change)
+
+
+class AggregationGroup(object):
+    """Aggregation Group object with helper methods.
+
+    Attributes:
+        group (SQLAlchemy): Instance of a SQLAlchemy AggregationGroup object.
+    """
+    def __init__(self, analyzer, name, description, user, sketch, view):
+        """Initializes the AggregationGroup object."""
+        self._analyzer = analyzer
+        self._name = name
+        self._description = description
+        self._user = user
+        self._sketch = sketch
+        self._view = view
+
+        self._orientation = 'layer'
+        self._parameters = ''
+
+    @property
+    def id(self):
+        """Returns the group ID."""
+        return 1
+
+    @property
+    def name(self):
+        """Returns the group name."""
+        return self._name
+
+    def add_aggregation(self, aggregation_obj):
+        """Add an aggregation object to the group.
+
+        Args:
+            aggregation_obj (Aggregation): the Aggregation objec.
+        """
+        params = {
+            'agg_id': aggregation_obj.id,
+            'agg_name': aggregation_obj.name,
+        }
+        change = SKETCH_CHANGE('AGGREGATION_GROUP_ADD', 'aggregation', params)
+        self._analyzer.updates.append(change)
+
+    def commit(self):
+        """Commit changes to DB."""
+        change = SKETCH_CHANGE(
+            'AGGREGATION_GROUP_CHANGE', 'commit_issued', {})
+        self._analyzer.updates.append(change)
+
+    def set_orientation(self, orientation='layer'):
+        """Sets how charts should be joined.
+
+        Args:
+            orienation: string that contains how they should be connected
+                together, That is the chart orientation,  the options are:
+                "layer", "horizontal" and "vertical". The default behavior
+                is "layer".
+        """
+        orientation = orientation.lower()
+        params = {
+            'orientation': orientation,
+        }
+        change = SKETCH_CHANGE(
+            'AGGREGATION_GROUP_CHANGE', 'orientation', params)
+        self._analyzer.updates.append(change)
+
+    def set_vertical(self):
+        """Sets the "orienation" to vertical."""
+        self.set_orientation('vertical')
+
+    def set_horizontal(self):
+        """Sets the "orientation" to horizontal."""
+        self.set_orientation('horizontal')
+
+    def set_layered(self):
+        """Sets the "orientation" to layer."""
+        self.set_orientation('layer')
+
+    def set_parameters(self, parameters=None):
+        """Sets the parameters for the aggregation group.
+
+        Args:
+            parameters: a JSON string or a dict with the parameters
+                for the aggregation group.
+        """
+        if isinstance(parameters, dict):
+            parameter_string = json.dumps(parameters)
+        elif isinstance(parameters, str):
+            parameter_string = parameters
+        elif parameters is None:
+            parameter_string = ''
+        else:
+            parameter_string = str(parameters)
+
+        params = {
+            'parameters': parameter_string,
+        }
+        change = SKETCH_CHANGE(
+            'AGGREGATION_GROUP_CHANGE', 'parameters', params)
+        self._analyzer.updates.append(change)
+        self._parameters = parameter_string

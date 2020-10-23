@@ -12,20 +12,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Elasticsearch datastore."""
-
 from __future__ import unicode_literals
 
 from collections import Counter
 import codecs
 import json
 import logging
+import socket
 
 from uuid import uuid4
 
 import six
 
 from elasticsearch import Elasticsearch
+from elasticsearch.exceptions import ConnectionTimeout
 from elasticsearch.exceptions import NotFoundError
+from elasticsearch.exceptions import RequestError
 # pylint: disable=redefined-builtin
 from elasticsearch.exceptions import ConnectionError
 from flask import abort
@@ -33,16 +35,19 @@ from flask import abort
 from timesketch.lib.definitions import HTTP_STATUS_CODE_NOT_FOUND
 
 # Setup logging
-es_logger = logging.getLogger('elasticsearch')
-es_logger.addHandler(logging.NullHandler())
+es_logger = logging.getLogger('timesketch.elasticsearch')
 es_logger.setLevel(logging.WARNING)
 
-ADD_LABEL_SCRIPT = """
+UPDATE_LABEL_SCRIPT = """
 if (ctx._source.timesketch_label == null) {
     ctx._source.timesketch_label = new ArrayList()
 }
-if( ! ctx._source.timesketch_label.contains (params.timesketch_label)) {
-    ctx._source.timesketch_label.add(params.timesketch_label)
+if (params.remove == true) {
+    ctx._source.timesketch_label.removeIf(label -> label.name == params.timesketch_label.name && label.sketch_id == params.timesketch_label.sketch_id);
+} else {
+    if( ! ctx._source.timesketch_label.contains (params.timesketch_label)) {
+        ctx._source.timesketch_label.add(params.timesketch_label)
+    }
 }
 """
 
@@ -50,14 +55,8 @@ TOGGLE_LABEL_SCRIPT = """
 if (ctx._source.timesketch_label == null) {
     ctx._source.timesketch_label = new ArrayList()
 }
-if(ctx._source.timesketch_label.contains(params.timesketch_label)) {
-    for (int i = 0; i < ctx._source.timesketch_label.size(); i++) {
-      if (ctx._source.timesketch_label[i] == params.timesketch_label) {
-        ctx._source.timesketch_label.remove(i)
-      }
-      i++;
-    }
-} else {
+boolean removedLabel = ctx._source.timesketch_label.removeIf(label -> label.name == params.timesketch_label.name && label.sketch_id == params.timesketch_label.sketch_id);
+if (!removedLabel) {
     ctx._source.timesketch_label.add(params.timesketch_label)
 }
 """
@@ -76,6 +75,7 @@ class ElasticsearchDataStore(object):
     def __init__(self, host='127.0.0.1', port=9200):
         """Create a Elasticsearch client."""
         super(ElasticsearchDataStore, self).__init__()
+        self._error_container = {}
         self.client = Elasticsearch([{'host': host, 'port': port}])
         self.import_counter = Counter()
         self.import_events = []
@@ -93,8 +93,7 @@ class ElasticsearchDataStore(object):
         """
         label_query = {
             'bool': {
-                'should': [],
-                "minimum_should_match": 1
+                'must': []
             }
         }
 
@@ -105,7 +104,7 @@ class ElasticsearchDataStore(object):
                         'bool': {
                             'must': [{
                                 'term': {
-                                    'timesketch_label.name': label
+                                    'timesketch_label.name.keyword': label
                                 }
                             }, {
                                 'term': {
@@ -117,7 +116,7 @@ class ElasticsearchDataStore(object):
                     'path': 'timesketch_label'
                 }
             }
-            label_query['bool']['should'].append(nested_query)
+            label_query['bool']['must'].append(nested_query)
         return label_query
 
     @staticmethod
@@ -204,11 +203,15 @@ class ElasticsearchDataStore(object):
             datetime_ranges = {
                 'bool': {
                     'should': [],
-                    "minimum_should_match": 1
+                    'minimum_should_match': 1
                 }
             }
 
             for chip in query_filter['chips']:
+                # Exclude chips that the user disabled
+                if not chip.get('active', True):
+                    continue
+
                 if chip['type'] == 'label':
                     labels.append(chip['value'])
 
@@ -331,19 +334,29 @@ class ElasticsearchDataStore(object):
                 search_type=search_type,
                 scroll=scroll_timeout)
 
-        # Suppress the lint error because elasticsearch-py adds parameters
-        # to the function with a decorator and this makes pylint sad.
+        # The argument " _source_include" changed to "_source_includes" in
+        # ES version 7. This check add support for both version 6 and 7 clients.
         # pylint: disable=unexpected-keyword-arg
-        return self.client.search(
-            body=query_dsl,
-            index=list(indices),
-            search_type=search_type,
-            _source_include=return_fields,
-            scroll=scroll_timeout)
+        if self.version.startswith('6'):
+            _search_result = self.client.search(
+                body=query_dsl,
+                index=list(indices),
+                search_type=search_type,
+                _source_include=return_fields,
+                scroll=scroll_timeout)
+        else:
+            _search_result = self.client.search(
+                body=query_dsl,
+                index=list(indices),
+                search_type=search_type,
+                _source_includes=return_fields,
+                scroll=scroll_timeout)
+
+        return _search_result
 
     def search_stream(self, sketch_id=None, query_string=None,
                       query_filter=None, query_dsl=None, indices=None,
-                      return_fields=None):
+                      return_fields=None, enable_scroll=True):
         """Search ElasticSearch. This will take a query string from the UI
         together with a filter definition. Based on this it will execute the
         search request on ElasticSearch and get result back.
@@ -355,6 +368,7 @@ class ElasticsearchDataStore(object):
             query_dsl: Dictionary containing Elasticsearch DSL query
             indices: List of indices to query
             return_fields: List of fields to return
+            enable_scroll: Boolean determing whether scrolling is enabled.
 
         Returns:
             Generator of event documents in JSON format
@@ -373,10 +387,19 @@ class ElasticsearchDataStore(object):
             query_filter=query_filter,
             indices=indices,
             return_fields=return_fields,
-            enable_scroll=True)
+            enable_scroll=enable_scroll)
 
-        scroll_id = result['_scroll_id']
-        scroll_size = result['hits']['total']
+        if enable_scroll:
+            scroll_id = result['_scroll_id']
+            scroll_size = result['hits']['total']
+        else:
+            scroll_id = None
+            scroll_size = 0
+
+        # Elasticsearch version 7.x returns total hits as a dictionary.
+        # TODO: Refactor when version 6.x has been deprecated.
+        if isinstance(scroll_size, dict):
+            scroll_size = scroll_size.get('value', 0)
 
         for event in result['hits']['hits']:
             yield event
@@ -388,6 +411,67 @@ class ElasticsearchDataStore(object):
             scroll_size = len(result['hits']['hits'])
             for event in result['hits']['hits']:
                 yield event
+
+    def get_filter_labels(self, sketch_id, indices):
+        """Aggregate labels for a sketch.
+
+        Args:
+            sketch_id: The Sketch ID
+            indices: List of indices to aggregate on
+
+        Returns:
+            List with label names.
+        """
+        # This is a workaround to return all labels by setting the max buckets
+        # to something big. If a sketch has more than this amount of labels
+        # the list will be incomplete but it should be uncommon to have >10k
+        # labels in a sketch.
+        max_labels = 10000
+
+        # pylint: disable=line-too-long
+        aggregation = {
+            'aggs': {
+                'nested': {
+                    'nested': {
+                        'path': 'timesketch_label'
+                    },
+                    'aggs': {
+                        'inner': {
+                            'filter': {
+                                'bool': {
+                                    'must': [{
+                                        'term': {
+                                            'timesketch_label.sketch_id': sketch_id
+                                        }
+                                    }]
+                                }
+                            },
+                            'aggs': {
+                                'labels': {
+                                    'terms': {
+                                        'size': max_labels,
+                                        'field': 'timesketch_label.name.keyword'
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        labels = []
+        # pylint: disable=unexpected-keyword-arg
+        result = self.client.search(index=indices, body=aggregation, size=0)
+        buckets = result.get(
+            'aggregations', {}).get('nested', {}).get('inner', {}).get(
+                'labels', {}).get('buckets', [])
+        for bucket in buckets:
+            # Filter out special labels like __ts_star etc.
+            if bucket['key'].startswith('__'):
+                continue
+            labels.append(bucket['key'])
+        return labels
 
     def get_event(self, searchindex_id, event_id):
         """Get one event from the datastore.
@@ -403,11 +487,21 @@ class ElasticsearchDataStore(object):
             # Suppress the lint error because elasticsearch-py adds parameters
             # to the function with a decorator and this makes pylint sad.
             # pylint: disable=unexpected-keyword-arg
-            return self.client.get(
-                index=searchindex_id,
-                id=event_id,
-                doc_type='_all',
-                _source_exclude=['timesketch_label'])
+            if self.version.startswith('6'):
+                event = self.client.get(
+                    index=searchindex_id,
+                    id=event_id,
+                    doc_type='_all',
+                    _source_exclude=['timesketch_label'])
+            else:
+                event = self.client.get(
+                    index=searchindex_id,
+                    id=event_id,
+                    doc_type='_all',
+                    _source_excludes=['timesketch_label'])
+
+            return event
+
         except NotFoundError:
             abort(HTTP_STATUS_CODE_NOT_FOUND)
 
@@ -422,11 +516,18 @@ class ElasticsearchDataStore(object):
         """
         if not indices:
             return 0
-        result = self.client.count(index=indices)
+        try:
+            result = self.client.count(index=indices)
+        except (NotFoundError, RequestError):
+            es_logger.error(
+                'Unable to count indexes (index not found)',
+                exc_info=True)
+            return 0
         return result.get('count', 0)
 
     def set_label(self, searchindex_id, event_id, event_type, sketch_id,
-                  user_id, label, toggle=False, single_update=True):
+                  user_id, label, toggle=False, remove=False,
+                  single_update=True):
         """Set label on event in the datastore.
 
         Args:
@@ -436,9 +537,9 @@ class ElasticsearchDataStore(object):
             sketch_id: Integer of sketch primary key
             user_id: Integer of user primary key
             label: String with the name of the label
+            remove: Optional boolean value if the label should be removed
             toggle: Optional boolean value if the label should be toggled
             single_update: Boolean if the label should be indexed immediately.
-            (add/remove). The default is False.
 
         Returns:
             Dict with updated document body, or None if this is a single update.
@@ -447,13 +548,14 @@ class ElasticsearchDataStore(object):
         update_body = {
             'script': {
                 'lang': 'painless',
-                'source': ADD_LABEL_SCRIPT,
+                'source': UPDATE_LABEL_SCRIPT,
                 'params': {
                     'timesketch_label': {
                         'name': str(label),
                         'user_id': user_id,
                         'sketch_id': sketch_id
-                    }
+                    },
+                    remove: remove
                 }
             }
         }
@@ -500,14 +602,19 @@ class ElasticsearchDataStore(object):
             Document type in string format.
         """
         _document_mapping = {
-            doc_type: {
-                'properties': {
-                    'timesketch_label': {
-                        'type': 'nested'
-                    }
+            'properties': {
+                'timesketch_label': {
+                    'type': 'nested'
+                },
+                'datetime': {
+                    'type': 'date'
                 }
             }
         }
+
+        # TODO: Remove when we deprecate Elasticsearch version 6.x
+        if self.version.startswith('6'):
+            _document_mapping = {doc_type: _document_mapping}
 
         if not self.client.indices.exists(index_name):
             try:
@@ -515,6 +622,12 @@ class ElasticsearchDataStore(object):
                     index=index_name, body={'mappings': _document_mapping})
             except ConnectionError:
                 raise RuntimeError('Unable to connect to Timesketch backend.')
+            except RequestError:
+                index_exists = self.client.indices.exists(index_name)
+                es_logger.warning(
+                    'Attempting to create an index that already exists '
+                    '({0:s} - {1:s})'.format(index_name, str(index_exists)))
+
         # We want to return unicode here to keep SQLalchemy happy.
         if six.PY2:
             if not isinstance(index_name, six.text_type):
@@ -544,11 +657,11 @@ class ElasticsearchDataStore(object):
         """Add event to Elasticsearch.
 
         Args:
-            flush_interval: Number of events to queue up before indexing
             index_name: Name of the index in Elasticsearch
             event_type: Type of event (e.g. plaso_event)
             event: Event dictionary
             event_id: Event Elasticsearch ID
+            flush_interval: Number of events to queue up before indexing
         """
         if event:
             for k, v in event.items():
@@ -565,16 +678,19 @@ class ElasticsearchDataStore(object):
             header = {
                 'index': {
                     '_index': index_name,
-                    '_type': event_type
                 }
             }
             update_header = {
                 'update': {
                     '_index': index_name,
-                    '_type': event_type,
                     '_id': event_id
                 }
             }
+
+            # TODO: Remove when we deprecate Elasticsearch version 6.x
+            if self.version.startswith('6'):
+                header['index']['_type'] = event_type
+                update_header['update']['_type'] = event_type
 
             if event_id:
                 # Event has "lang" defined if there is a script used for import.
@@ -589,18 +705,94 @@ class ElasticsearchDataStore(object):
             self.import_counter['events'] += 1
 
             if self.import_counter['events'] % int(flush_interval) == 0:
-                self.client.bulk(body=self.import_events)
+                _ = self.flush_queued_events()
                 self.import_events = []
         else:
             # Import the remaining events in the queue.
             if self.import_events:
-                self.client.bulk(body=self.import_events)
+                _ = self.flush_queued_events()
 
         return self.import_counter['events']
 
     def flush_queued_events(self):
-        if self.import_events:
-            self.client.bulk(body=self.import_events)
+        """Flush all queued events.
+
+        Returns:
+            dict: A dict object that contains the number of events
+                that were sent to Elastic as well as information
+                on whether there were any errors, and what the
+                details of these errors if any.
+        """
+        if not self.import_events:
+            return {}
+
+        return_dict = {
+            'number_of_events': len(self.import_events) / 2,
+            'total_events': self.import_counter['events'],
+        }
+
+        try:
+            results = self.client.bulk(body=self.import_events)
+        except (ConnectionTimeout, socket.timeout):
+            # TODO: Add a retry here.
+            es_logger.error('Unable to add events', exc_info=True)
+
+        errors_in_upload = results.get('errors', False)
+        return_dict['errors_in_upload'] = errors_in_upload
+
+        if errors_in_upload:
+            items = results.get('items', [])
+            return_dict['errors'] = []
+
+            es_logger.error('Errors while attempting to upload events.')
+            for item in items:
+                index = item.get('index', {})
+                index_name = index.get('_index', 'N/A')
+
+                _ = self._error_container.setdefault(
+                    index_name, {
+                        'errors': [],
+                        'types': Counter(),
+                        'details': Counter()
+                    }
+                )
+
+                error_counter = self._error_container[index_name]['types']
+                error_detail_counter = self._error_container[index_name][
+                    'details']
+                error_list = self._error_container[index_name]['errors']
+
+                error = index.get('error', {})
+                status_code = index.get('status', 0)
+                doc_id = index.get('_id', '')
+                caused_by = error.get('caused_by', {})
+
+                caused_reason = caused_by.get(
+                    'reason', 'Unkown Detailed Reason')
+
+                error_counter[error.get('type')] += 1
+                detail_msg = '{0:s}/{1:s}'.format(
+                    caused_by.get('type', 'Unknown Detailed Type'),
+                    ' '.join(caused_reason.split()[:5])
+                )
+                error_detail_counter[detail_msg] += 1
+
+                error_msg = '<{0:s}> {1:s} [{2:s}/{3:s}]'.format(
+                    error.get('type', 'Unknown Type'),
+                    error.get('reason', 'No reason given'),
+                    caused_by.get('type', 'Unknown Type'),
+                    caused_reason,
+                )
+                error_list.append(error_msg)
+                es_logger.error(
+                    'Unable to upload document: {0:s} to index {1:s} - '
+                    '[{2:d}] {3:s}'.format(
+                        doc_id, index_name, status_code, error_msg))
+
+        return_dict['error_container'] = self._error_container
+
+        self.import_events = []
+        return return_dict
 
     @property
     def version(self):

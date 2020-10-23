@@ -15,24 +15,32 @@
 
 from __future__ import unicode_literals
 
+import datetime
 import json
 import logging
 import os
+import time
 import traceback
 import yaml
 
+from flask import current_app
+
 import pandas
 
-from flask import current_app
 from timesketch.lib import definitions
 from timesketch.lib.datastores.elastic import ElasticsearchDataStore
 from timesketch.models import db_session
 from timesketch.models.sketch import Aggregation
+from timesketch.models.sketch import AggregationGroup as SQLAggregationGroup
 from timesketch.models.sketch import Event as SQLEvent
 from timesketch.models.sketch import Sketch as SQLSketch
+from timesketch.models.sketch import Story as SQLStory
 from timesketch.models.sketch import SearchIndex
 from timesketch.models.sketch import View
 from timesketch.models.sketch import Analysis
+
+
+logger = logging.getLogger('timesketch.analyzers')
 
 
 def _flush_datastore_decorator(func):
@@ -42,6 +50,7 @@ def _flush_datastore_decorator(func):
         self.datastore.flush_queued_events()
         return func_return
     return wrapper
+
 
 def get_config_path(file_name):
     """Returns a path to a configuration file.
@@ -85,7 +94,7 @@ def get_yaml_config(file_name):
             return yaml.safe_load(fh)
         except yaml.parser.ParserError as exception:
             # pylint: disable=logging-format-interpolation
-            logging.warning((
+            logger.warning((
                 'Unable to read in YAML config file, '
                 'with error: {0!s}').format(exception))
             return {}
@@ -286,7 +295,7 @@ class Sketch(object):
 
     def add_aggregation(
             self, name, agg_name, agg_params, description='', view_id=None,
-            chart_type=None):
+            chart_type=None, label=''):
         """Add aggregation to the sketch.
 
         Args:
@@ -297,6 +306,7 @@ class Sketch(object):
                 this is optional.
             view_id: optional ID of the view to attach the aggregation to.
             chart_type: string representing the chart type.
+            label: string with a label to attach to the aggregation.
         """
         if not agg_name:
             raise ValueError('Aggregator name needs to be defined.')
@@ -308,17 +318,51 @@ class Sketch(object):
         else:
             view = None
 
+        if chart_type:
+            agg_params['supported_charts'] = chart_type
+
         agg_json = json.dumps(agg_params)
         aggregation = Aggregation.get_or_create(
             name=name, description=description, agg_type=agg_name,
             parameters=agg_json, chart_type=chart_type, user=None,
             sketch=self.sql_sketch, view=view)
+
+        if label:
+            aggregation.add_label(label)
         db_session.add(aggregation)
         db_session.commit()
         return aggregation
 
+    def add_aggregation_group(self, name, description='', view_id=None):
+        """Add aggregation Group to the sketch.
+
+        Args:
+            name: the name of the aggregation run.
+            description: optional description of the aggregation, visible in
+                the UI.
+            view_id: optional ID of the view to attach the aggregation to.
+        """
+        if not name:
+            raise ValueError('Aggregator group name needs to be defined.')
+
+        if view_id:
+            view = View.query.get(view_id)
+        else:
+            view = None
+
+        if not description:
+            description = 'Created by an analyzer'
+
+        aggregation_group = SQLAggregationGroup.get_or_create(
+            name=name, description=description, user=None,
+            sketch=self.sql_sketch, view=view)
+        db_session.add(aggregation_group)
+        db_session.commit()
+
+        return AggregationGroup(aggregation_group)
+
     def add_view(self, view_name, analyzer_name, query_string=None,
-                 query_dsl=None, query_filter=None):
+                 query_dsl=None, query_filter=None, additional_fields=None):
         """Add saved view to the Sketch.
 
         Args:
@@ -327,6 +371,8 @@ class Sketch(object):
             query_string: Elasticsearch query string.
             query_dsl: Dictionary with Elasticsearch DSL query.
             query_filter: Dictionary with Elasticsearch filters.
+            additional_fields: A list with field names to include in the
+                view output.
 
         Raises:
             ValueError: If both query_string an query_dsl are missing.
@@ -339,16 +385,48 @@ class Sketch(object):
         if not query_filter:
             query_filter = {'indices': '_all'}
 
-        name = '[{0:s}] {1:s}'.format(analyzer_name, view_name)
-        view = View.get_or_create(name=name, sketch=self.sql_sketch, user=None)
+        if additional_fields:
+            query_filter['fields'] = [
+                {'field': x.strip()} for x in additional_fields]
+
+        description = 'analyzer: {0:s}'.format(analyzer_name)
+        view = View.get_or_create(
+            name=view_name, description=description, sketch=self.sql_sketch,
+            user=None)
+        view.description = description
         view.query_string = query_string
         view.query_filter = view.validate_filter(query_filter)
         view.query_dsl = query_dsl
         view.searchtemplate = None
+        view.set_status(status='new')
 
         db_session.add(view)
         db_session.commit()
         return view
+
+    def add_story(self, title):
+        """Add a story to the Sketch.
+
+        Args:
+            title: The name of the view.
+
+        Raises:
+            ValueError: If both query_string an query_dsl are missing.
+
+        Returns:
+            An instance of a Story object.
+        """
+        story = SQLStory.query.filter_by(
+            title=title, sketch=self.sql_sketch, user=None).first()
+
+        if story:
+            return Story(story)
+
+        story = SQLStory.get_or_create(
+            title=title, content='[]', sketch=self.sql_sketch, user=None)
+        db_session.add(story)
+        db_session.commit()
+        return Story(story)
 
     def get_all_indices(self):
         """List all indices in the Sketch.
@@ -358,6 +436,239 @@ class Sketch(object):
         active_timelines = self.sql_sketch.active_timelines
         indices = [t.searchindex.index_name for t in active_timelines]
         return indices
+
+
+class AggregationGroup(object):
+    """Aggregation Group object with helper methods.
+
+    Attributes:
+        group (SQLAlchemy): Instance of a SQLAlchemy AggregationGroup object.
+    """
+    def __init__(self, aggregation_group):
+        """Initializes the AggregationGroup object.
+
+        Args:
+            aggregation_group: SQLAlchemy AggregationGroup object.
+        """
+        self.group = aggregation_group
+        self._orientation = 'layer'
+        self._parameters = ''
+
+    @property
+    def id(self):
+        """Returns the group ID."""
+        return self.group.id
+
+    @property
+    def name(self):
+        """Returns the group name."""
+        return self.group.name
+
+    def add_aggregation(self, aggregation_obj):
+        """Add an aggregation object to the group.
+
+        Args:
+            aggregation_obj (Aggregation): the Aggregation objec.
+        """
+        self.group.aggregations.append(aggregation_obj)
+        self.group.orientation = self._orientation
+        db_session.add(aggregation_obj)
+        db_session.add(self.group)
+        db_session.commit()
+
+    def commit(self):
+        """Commit changes to DB."""
+        self.group.orientation = self._orientation
+        self.group.parameters = self._parameters
+        db_session.add(self.group)
+        db_session.commit()
+
+    def set_orientation(self, orientation='layer'):
+        """Sets how charts should be joined.
+
+        Args:
+            orienation: string that contains how they should be connected
+                together, That is the chart orientation,  the options are:
+                "layer", "horizontal" and "vertical". The default behavior
+                is "layer".
+        """
+        orientation = orientation.lower()
+        if orientation == 'layer' or orientation.starstwith('layer'):
+            self._orientation = 'layer'
+        elif orientation == 'horizontal' or orientation.startswith('hor'):
+            self._orientation = 'horizontal'
+        elif orientation == 'vertical' or orientation.startswith('ver'):
+            self._orientation = 'vertical'
+        self.commit()
+
+    def set_vertical(self):
+        """Sets the "orienation" to vertical."""
+        self._orientation = 'vertical'
+        self.commit()
+
+    def set_horizontal(self):
+        """Sets the "orientation" to horizontal."""
+        self._orientation = 'horizontal'
+        self.commit()
+
+    def set_layered(self):
+        """Sets the "orientation" to layer."""
+        self._orientation = 'layer'
+        self.commit()
+
+    def set_parameters(self, parameters=None):
+        """Sets the parameters for the aggregation group.
+
+        Args:
+            parameters: a JSON string or a dict with the parameters
+                for the aggregation group.
+        """
+        if isinstance(parameters, dict):
+            parameter_string = json.dumps(parameters)
+        elif isinstance(parameters, str):
+            parameter_string = parameters
+        elif parameters is None:
+            parameter_string = ''
+        else:
+            parameter_string = str(parameters)
+        self._parameters = parameter_string
+        self.commit()
+
+
+class Story(object):
+    """Story object with helper methods.
+
+    Attributes:
+        story (SQLAlchemy): Instance of a SQLAlchemy Story object.
+    """
+    def __init__(self, story):
+        """Initializes a Story object.
+
+        Args:
+            story: SQLAlchemy Story object.
+        """
+        self.story = story
+
+    @property
+    def data(self):
+        """Return back the content of the story object."""
+        return json.loads(self.story.content)
+
+    @staticmethod
+    def _create_new_block():
+        """Create a new block to be added to a Story.
+
+        Returns:
+            Dictionary with default block content.
+        """
+        block = {
+            'componentName': '',
+            'componentProps': {},
+            'content': '',
+            'edit': False,
+            'showPanel': False,
+            'isActive': False
+        }
+        return block
+
+    def _commit(self, block):
+        """Commit the Story to database.
+
+        Args:
+            block (dict): Block to add.
+        """
+        story_blocks = json.loads(self.story.content)
+        story_blocks.append(block)
+        self.story.content = json.dumps(story_blocks)
+        db_session.add(self.story)
+        db_session.commit()
+
+    def add_text(self, text, skip_if_exists=False):
+        """Add a text block to the Story.
+
+        Args:
+            text (str): text (markdown is supported) to add to the story.
+            skip_if_exists (boolean): if set to True then the text
+                will not be added if a block with this text already exists.
+        """
+        if skip_if_exists and self.data:
+            for block in self.data:
+                if not block:
+                    continue
+                if not isinstance(block, dict):
+                    continue
+                old_text = block.get('content')
+                if not old_text:
+                    continue
+                if text == old_text:
+                    return
+
+        block = self._create_new_block()
+        block['content'] = text
+        self._commit(block)
+
+    def add_aggregation(self, aggregation, agg_type=''):
+        """Add a saved aggregation to the Story.
+
+        Args:
+            aggregation (Aggregation): Saved aggregation to add to the story.
+            agg_type (str): string indicating the type of aggregation, can be:
+                "table" or the name of the chart to be used, eg "barcharct",
+                "hbarchart". Defaults to the value of supported_charts.
+        """
+        today = datetime.datetime.utcnow()
+        block = self._create_new_block()
+        parameter_dict = json.loads(aggregation.parameters)
+        if agg_type:
+            parameter_dict['supported_charts'] = agg_type
+        else:
+            agg_type = parameter_dict.get('supported_charts')
+            # Neither agg_type nor supported_charts is set.
+            if not agg_type:
+                agg_type = 'table'
+                parameter_dict['supported_charts'] = 'table'
+
+        block['componentName'] = 'TsAggregationCompact'
+        block['componentProps']['aggregation'] = {
+            'agg_type': aggregation.agg_type,
+            'id': aggregation.id,
+            'name': aggregation.name,
+            'chart_type': agg_type,
+            'description': aggregation.description,
+            'created_at': today.isoformat(),
+            'updated_at': today.isoformat(),
+            'parameters': json.dumps(parameter_dict),
+            'user': {'username': None},
+            }
+        self._commit(block)
+
+    def add_aggregation_group(self, aggregation_group):
+        """Add an aggregation group to the Story.
+
+        Args:
+            aggregation_group (SQLAggregationGroup): Save aggregation group
+                to add to the story.
+        """
+        if not isinstance(aggregation_group, AggregationGroup):
+            return
+
+        block = self._create_new_block()
+        block['componentName'] = 'TsAggregationGroupCompact'
+        block['componentProps']['aggregation_group'] = {
+            'id': aggregation_group.id,
+            'name': aggregation_group.name}
+        self._commit(block)
+
+    def add_view(self, view):
+        """Add a saved view to the Story.
+
+        Args:
+            view (View): Saved view to add to the story.
+        """
+        block = self._create_new_block()
+        block['componentName'] = 'TsViewEventList'
+        block['componentProps']['view'] = {'id': view.id, 'name': view.name}
+        self._commit(block)
 
 
 class BaseIndexAnalyzer(object):
@@ -381,6 +692,11 @@ class BaseIndexAnalyzer(object):
     # Used as hints to the frontend UI in order to render input forms.
     FORM_FIELDS = []
 
+    # Configure how long an analyzer should run before the timeline
+    # gets fully indexed.
+    SECONDS_PER_WAIT = 10
+    MAXIMUM_WAITS = 360
+
     def __init__(self, index_name):
         """Initialize the analyzer object.
 
@@ -389,6 +705,7 @@ class BaseIndexAnalyzer(object):
         """
         self.name = self.NAME
         self.index_name = index_name
+        self.timeline_name = ''
         self.datastore = ElasticsearchDataStore(
             host=current_app.config['ELASTIC_HOST'],
             port=current_app.config['ELASTIC_PORT'])
@@ -398,7 +715,7 @@ class BaseIndexAnalyzer(object):
 
     def event_stream(
             self, query_string=None, query_filter=None, query_dsl=None,
-            indices=None, return_fields=None):
+            indices=None, return_fields=None, scroll=True):
         """Search ElasticSearch.
 
         Args:
@@ -407,6 +724,8 @@ class BaseIndexAnalyzer(object):
             query_dsl: Dictionary containing Elasticsearch DSL query.
             indices: List of indices to query.
             return_fields: List of fields to return.
+            scroll: Boolean determining whether we support scrolling searches
+                or not. Defaults to True.
 
         Returns:
             Generator of Event objects.
@@ -441,7 +760,8 @@ class BaseIndexAnalyzer(object):
             query_filter=query_filter,
             query_dsl=query_dsl,
             indices=indices,
-            return_fields=return_fields
+            return_fields=return_fields,
+            enable_scroll=scroll,
         )
         for event in event_generator:
             yield Event(event, self.datastore, sketch=self.sketch)
@@ -458,6 +778,33 @@ class BaseIndexAnalyzer(object):
         """
         analysis = Analysis.query.get(analysis_id)
         analysis.set_status('STARTED')
+
+        timeline = analysis.timeline
+        self.timeline_name = timeline.name
+        searchindex = timeline.searchindex
+
+        counter = 0
+        while True:
+            status = searchindex.get_status.status
+            status = status.lower()
+            if status == 'ready':
+                break
+
+            if status == 'fail':
+                logger.error(
+                    'Unable to run analyzer on a failed index ({0:s})'.format(
+                        searchindex.index_name))
+                return 'Failed'
+
+            time.sleep(self.SECONDS_PER_WAIT)
+            counter += 1
+            if counter >= self.MAXIMUM_WAITS:
+                logger.error(
+                    'Indexing has taken too long time, aborting run of '
+                    'analyzer')
+                return 'Failed'
+            # Refresh the searchindex object.
+            db_session.refresh(searchindex)
 
         # Run the analyzer. Broad Exception catch to catch any error and store
         # the error in the DB for display in the UI.

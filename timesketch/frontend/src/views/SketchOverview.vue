@@ -14,12 +14,27 @@ See the License for the specific language governing permissions and
 limitations under the License.
 -->
 <template>
-  <div>
+  <div v-if="sketch.status">
 
+    <div v-if="isArchived" class="task-container columns is-multiline" style="margin-top:50px;">
+      <div class="card column is-half is-offset-one-quarter has-text-centered" style="min-height: 300px; padding-top: 90px;">
+        <h4 class="title is-4">{{ sketch.name }}</h4>
+        <p>This sketch has been archived</p>
+        <div class="buttons is-centered" style="margin-top:30px">
+          <button v-on:click="unArchiveSketch()" class="button is-success is-outlined">Unarchive</button>
+          <button v-on:click="exportSketch()" class="button is-link is-outlined">Export</button>
+        </div>
+      </div>
+    </div>
+
+    <div v-if="!isArchived">
     <section class="section">
       <div class="container is-fluid">
-        <ts-navbar-secondary v-if="sketch.active_timelines.length" currentAppContext="sketch" currentPage="overview">
-          <b-tooltip :label="shareTooltip" position="is-bottom" type="is-white">
+        <ts-navbar-secondary currentAppContext="sketch" currentPage="overview">
+
+          <span v-for="label in meta.sketch_labels" :key="label" style="margin-right:10px; color: var(--default-font-color);font-size: 0.7em">{{  label }}</span>
+
+          <b-tooltip v-if="meta.collaborators" :label="shareTooltip" position="is-bottom" type="is-white">
             <a v-if="meta.permissions.write" class="button is-info is-rounded" style="margin-right:10px;" v-on:click="showShareModal = !showShareModal">
                 <span class="icon is-small">
                   <i v-if="meta.permissions.public" class="fas fa-globe"></i>
@@ -29,24 +44,34 @@ limitations under the License.
               <span>Share</span>
             </a>
           </b-tooltip>
-          <div v-if="meta.permissions.write" class="dropdown is-hoverable is-right" v-bind:class="{'is-active': settingsDropdownActive}">
-            <div class="dropdown-trigger">
-              <a class="button" style="background:transparent;border:none;" aria-haspopup="true" aria-controls="dropdown-menu" v-on:click="settingsDropdownActive = !settingsDropdownActive">
-                <span>More</span>
-                <span class="icon is-small">
-                <i class="fas fa-angle-down" aria-hidden="true"></i>
+
+          <b-dropdown v-if="meta.permissions.write" aria-role="list" position="is-bottom-left">
+            <a class="button ts-dropdown-button" style="background:transparent;border:none;" slot="trigger" slot-scope="{ active }">
+              <span class="icon is-small">
+                <i :class="active ? 'fas fa-angle-up' : 'fas fa-angle-down'"></i>
               </span>
+              <span>More</span>
+            </a>
+            <b-dropdown-item v-if="meta.permissions.delete" aria-role="listitem">
+              <a class="dropdown-item" v-on:click="showDeleteSketchModal = !showDeleteSketchModal">
+                <span class="icon is-small" style="margin-right:5px;"><i class="fas fa-trash"></i></span>
+                <span>Delete</span>
               </a>
-            </div>
-            <div class="dropdown-menu" id="dropdown-menu" role="menu">
-              <div class="dropdown-content">
-                <a v-if="meta.permissions.delete" class="dropdown-item" v-on:click="showDeleteSketchModal = !showDeleteSketchModal">
-                  <span class="icon is-small" style="margin-right:5px;"><i class="fas fa-trash"></i></span>
-                  <span>Delete</span>
-                </a>
-              </div>
-            </div>
-          </div>
+            </b-dropdown-item>
+            <b-dropdown-item v-if="meta.permissions.delete" aria-role="listitem">
+              <a class="dropdown-item" v-on:click="archiveSketch">
+                <span class="icon is-small" style="margin-right:5px;"><i class="fas fa-archive"></i></span>
+                <span>Archive</span>
+              </a>
+            </b-dropdown-item>
+            <b-dropdown-item v-if="meta.permissions.read" aria-role="listitem">
+              <a class="dropdown-item" v-on:click="exportSketch()">
+                <span class="icon is-small" style="margin-right:5px;"><i class="fas fa-file-export"></i></span>
+                <span>Export</span>
+              </a>
+            </b-dropdown-item>
+          </b-dropdown>
+
         </ts-navbar-secondary>
       </div>
     </section>
@@ -113,12 +138,20 @@ limitations under the License.
         <div class="card" style="min-height: 200px;">
           <div class="card-content">
             <ts-sketch-summary :sketch="sketch"></ts-sketch-summary>
+            <br>
+            <b-field grouped group-multiline>
+              <div class="control" v-for="user in sortedUserList()" :key="user.name">
+                <b-tag attached size="is-medium">{{ user }}</b-tag>
+              </div>
+              <div class="control" v-for="group in sortedGroupList()" :key="group.name">
+                <b-tag attached size="is-medium">{{ group }}</b-tag>
+              </div>
+            </b-field>
           </div>
         </div>
       </div>
     </section>
 
-    <!-- Stats -->
     <section class="section" v-if="sketch.active_timelines.length">
       <div class="container is-fluid">
         <div class="card" style="min-height: 100px;">
@@ -159,7 +192,7 @@ limitations under the License.
                 </div>
               </header>
               <div class="card-content" style="padding:5px;">
-                <ts-timeline-list :timelines="sketch.timelines" :controls="false"></ts-timeline-list>
+                <ts-timeline-list :timelines="sketch.timelines" :controls="true" :is-compact="true"></ts-timeline-list>
               </div>
             </div>
           </div>
@@ -168,7 +201,7 @@ limitations under the License.
           <div class="column" v-if="meta.views && meta.views.length ? meta.views.length: false">
             <div class="card has-min-height">
               <header class="card-header">
-                <p class="card-header-title">Views</p>
+                <p class="card-header-title">Saved searches</p>
                 <div class="field is-grouped is-pulled-right" style="padding: 0.75rem;">
                   <p class="control">
                     <router-link class="button is-rounded is-small" :to="{ name: 'SketchManageViews' }">
@@ -193,7 +226,7 @@ limitations under the License.
                 <p class="card-header-title">Stories</p>
               </header>
               <div class="card-content" style="padding:5px;">
-                <ts-sketch-story-list></ts-sketch-story-list>
+                <ts-sketch-story-list :controls="false"></ts-sketch-story-list>
               </div>
             </div>
           </div>
@@ -203,6 +236,7 @@ limitations under the License.
 
     <ts-sketch-timelines-manage v-if="!sketch.timelines.length" :hide-navigation="true"></ts-sketch-timelines-manage>
 
+    </div>
   </div>
 </template>
 
@@ -226,14 +260,16 @@ export default {
     TsUploadTimelineForm,
     TsSketchStoryList,
     TsSketchTimelinesManage,
-    TsShareForm
+    TsShareForm,
   },
   data () {
     return {
-      settingsDropdownActive: false,
       showUploadTimelineModal: false,
       showDeleteSketchModal: false,
-      showShareModal: false
+      showShareModal: false,
+      isFullPage: true,
+      loadingComponent: null,
+      isArchived: false
     }
   },
   computed: {
@@ -246,7 +282,7 @@ export default {
     count () {
       return this.$store.state.count
     },
-    shareTooltip () {
+    shareTooltip: function () {
       let msg = ''
       let baseMsg = 'Shared with '
       if (this.meta.collaborators.users.length) {
@@ -269,6 +305,48 @@ export default {
         console.error(e)
       })
     },
+    archiveSketch: function () {
+      this.isArchived = true
+      ApiClient.archiveSketch(this.sketch.id).then((response) => {
+        this.$store.dispatch('updateSketch', this.sketch.id)
+        this.$router.push({ name: 'SketchOverview', params: { sketchId: this.sketch.id } })
+      }).catch((e) => {
+        console.error(e)
+      })
+    },
+    unArchiveSketch: function () {
+      this.isArchived = false
+      ApiClient.unArchiveSketch(this.sketch.id).then((response) => {
+        this.$store.dispatch('updateSketch', this.sketch.id)
+        this.$router.push({ name: 'SketchOverview', params: { sketchId: this.sketch.id } })
+      }).catch((e) => {
+        console.error(e)
+      })
+    },
+    exportSketch: function () {
+      this.loadingOpen()
+      ApiClient.exportSketch(this.sketch.id).then((response) => {
+        let fileURL = window.URL.createObjectURL(new Blob([response.data]));
+        let fileLink = document.createElement('a');
+        let fileName = 'sketch-' + this.sketch.id + '-export.zip'
+        fileLink.href = fileURL;
+        fileLink.setAttribute('download', fileName);
+        document.body.appendChild(fileLink);
+        fileLink.click();
+        this.loadingClose()
+      }).catch((e) => {
+        console.error(e)
+        this.loadingClose()
+      })
+    },
+    sortedUserList: function () {
+      const userArrayCopy = [...this.$store.state.meta.collaborators.users];
+      return userArrayCopy.sort()
+    },
+    sortedGroupList: function () {
+      const groupArrayCopy = [...this.$store.state.meta.collaborators.groups];
+      return groupArrayCopy.sort()
+    },
     closeShareModal: function () {
       this.showShareModal = false
       this.$buefy.snackbar.open({
@@ -279,6 +357,19 @@ export default {
         queue: false
       })
       this.$store.dispatch('updateSketch', this.sketch.id)
+    },
+    loadingOpen: function () {
+      this.loadingComponent = this.$buefy.loading.open({
+        container: this.isFullPage ? null : this.$refs.element.$el
+      })
+    },
+    loadingClose: function () {
+      this.loadingComponent.close()
+    }
+  },
+  created: function () {
+    if (this.sketch.status[0].status === 'archived') {
+      this.isArchived = true
     }
   }
 }
@@ -288,4 +379,24 @@ export default {
   .has-min-height {
     min-height: 300px;
   }
+  .center-container {
+    display: flex;
+    height: 100%;
+    width: 100%;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid red;
+  }
+  .archive-card.is-wide {
+    width: 520px;
+    height: 350px;
+    padding-top:30px;
+  }
+  .archive-card.has-text-centered,
+  .archive-card-content {
+    justify-content: center;
+    align-items: center;
+  }
+
+
 </style>

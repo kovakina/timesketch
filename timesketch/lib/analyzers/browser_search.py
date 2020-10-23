@@ -10,7 +10,11 @@ from six.moves import urllib_parse as urlparse
 
 from timesketch.lib.analyzers import interface
 from timesketch.lib.analyzers import manager
+from timesketch.lib.analyzers import utils
 from timesketch.lib import emojis
+
+
+logger = logging.getLogger('timesketch.analyzers.browser_search')
 
 
 class BrowserSearchSketchPlugin(interface.BaseSketchAnalyzer):
@@ -18,7 +22,10 @@ class BrowserSearchSketchPlugin(interface.BaseSketchAnalyzer):
 
     NAME = 'browser_search'
 
-    DEPENDENCIES = frozenset()
+    DEPENDENCIES = frozenset(['domain'])
+
+    # A list of fields to include in the view output.
+    _FIELDS_TO_INCLUDE = ['domain', 'url', 'search_string']
 
     # Here we define filters and callback methods for all hits on each filter.
     _URL_FILTERS = frozenset([
@@ -78,7 +85,7 @@ class BrowserSearchSketchPlugin(interface.BaseSketchAnalyzer):
                 decoded_url = decoded_url.decode('utf-8')
             except UnicodeDecodeError as exception:
                 decoded_url = decoded_url.decode('utf-8', errors='replace')
-                logging.warning(
+                logger.warning(
                     'Unable to decode URL: {0:s} with error: {1!s}'.format(
                         url, exception))
 
@@ -166,8 +173,8 @@ class BrowserSearchSketchPlugin(interface.BaseSketchAnalyzer):
         Returns:
             String with summary of the analyzer result
         """
-        query = 'source_short:"WEBHIST"'
-        return_fields = ['url']
+        query = 'source_short:"WEBHIST" OR source:"WEBHIST"'
+        return_fields = ['url', 'datetime']
         search_emoji = emojis.get_emoji('MAGNIFYING_GLASS')
 
         # Generator of events based on your query.
@@ -199,7 +206,12 @@ class BrowserSearchSketchPlugin(interface.BaseSketchAnalyzer):
                     continue
 
                 simple_counter += 1
-                event.add_attributes({'search_string': search_query})
+                datetime = event.source.get('datetime')
+                day, _, _ = datetime.partition('T')
+                event.add_attributes({
+                    'search_string': search_query,
+                    'search_engine': engine,
+                    'search_day': 'D:{0:s}'.format(day)})
 
                 event.add_human_readable('{0:s} search query: {1:s}'.format(
                     engine, search_query), self.NAME)
@@ -214,15 +226,67 @@ class BrowserSearchSketchPlugin(interface.BaseSketchAnalyzer):
         if simple_counter > 0:
             view = self.sketch.add_view(
                 view_name='Browser Search', analyzer_name=self.NAME,
-                query_string='tag:"browser-search"')
+                query_string='tag:"browser-search"',
+                additional_fields=self._FIELDS_TO_INCLUDE)
+
             params = {
                 'field': 'search_string',
                 'limit': 20,
+                'index': self.index_name,
             }
-            self.sketch.add_aggregation(
-                name='Top 20 browser search queries.', agg_name='field_bucket',
-                agg_params=params, view_id=view.id, chart_type='hbarchart',
+            agg_obj = self.sketch.add_aggregation(
+                name='Top 20 browser search queries ({0:s})'.format(
+                    self.timeline_name),
+                agg_name='field_bucket', agg_params=params, view_id=view.id,
+                chart_type='table',
                 description='Created by the browser search analyzer')
+
+            params = {
+                'field': 'search_day',
+                'index': self.index_name,
+                'limit': 20,
+            }
+            agg_days = self.sketch.add_aggregation(
+                name='Top 20 days of search queries ({0:s})'.format(
+                    self.timeline_name), agg_name='field_bucket',
+                agg_params=params, chart_type='table',
+                description='Created by the browser search analyzer',
+                label='informational')
+
+            params = {
+                'query_string': 'tag:"browser-search"',
+                'index': self.index_name,
+                'field': 'domain',
+            }
+            agg_engines = self.sketch.add_aggregation(
+                name='Top Search Engines ({0:s})'.format(self.timeline_name),
+                agg_name='query_bucket', agg_params=params, view_id=view.id,
+                chart_type='hbarchart',
+                description='Created by the browser search analyzer')
+
+            story = self.sketch.add_story('{0:s} - {1:s}'.format(
+                utils.BROWSER_STORY_TITLE, self.timeline_name))
+            story.add_text(utils.BROWSER_STORY_HEADER, skip_if_exists=True)
+
+            story.add_text(
+                '## Browser Search Analyzer.\n\nThe browser search '
+                'analyzer takes URLs usually resevered for browser '
+                'search queries and extracts the search string.'
+                'In this timeline the analyzer discovered {0:d} '
+                'browser searches.\n\nThis is a summary of '
+                'it\'s findings for the timeline **{1:s}**.'.format(
+                    simple_counter, self.timeline_name))
+
+            story.add_text(
+                'The top 20 most commonly discovered searches were:')
+            story.add_aggregation(agg_obj)
+            story.add_text('The domains used to search:')
+            story.add_aggregation(agg_engines, 'hbarchart')
+            story.add_text('And the most common days of search:')
+            story.add_aggregation(agg_days)
+            story.add_text(
+                'And an overview of all the discovered search terms:')
+            story.add_view(view)
 
         return (
             'Browser Search completed with {0:d} search results '

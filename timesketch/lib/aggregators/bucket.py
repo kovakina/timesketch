@@ -23,43 +23,37 @@ class TermsAggregation(interface.BaseAggregator):
     """Terms Bucket Aggregation."""
 
     NAME = 'field_bucket'
+    DISPLAY_NAME = 'Terms Aggregation'
     DESCRIPTION = 'Aggregating values of a particular field'
 
-    SUPPORTED_CHARTS = frozenset(['barchart', 'hbarchart'])
+    SUPPORTED_CHARTS = frozenset(
+        ['barchart', 'circlechart', 'hbarchart', 'linechart', 'table'])
 
     FORM_FIELDS = [
         {
             'type': 'ts-dynamic-form-select-input',
             'name': 'supported_charts',
             'label': 'Chart type to render',
-            'options': list(SUPPORTED_CHARTS)
+            'options': list(SUPPORTED_CHARTS),
+            'display': True
         },
         {
             'type': 'ts-dynamic-form-text-input',
             'name': 'field',
             'label': 'What field to aggregate on',
             'placeholder': 'Enter a field to aggregate',
-            'default_value': ''
+            'default_value': '',
+            'display': True
         },
         {
             'type': 'ts-dynamic-form-text-input',
             'name': 'limit',
             'label': 'Number of results to return',
             'placeholder': 'Enter number of results to return',
-            'default_value': '10'
+            'default_value': '10',
+            'display': True
         }
     ]
-
-    def __init__(self, sketch_id=None, index=None):
-        """Initialize the aggregator object.
-
-        Args:
-            sketch_id: Sketch ID.
-            index: List of elasticsearch index names.
-        """
-        super(TermsAggregation, self).__init__(
-            sketch_id=sketch_id, index=index)
-        self.field = ''
 
     @property
     def chart_title(self):
@@ -69,17 +63,24 @@ class TermsAggregation(interface.BaseAggregator):
         return 'Top results for an unknown field'
 
     # pylint: disable=arguments-differ
-    def run(self, field, limit=10):
+    def run(
+            self, field, limit=10, supported_charts='table',
+            order_field='count'):
         """Run the aggregation.
 
         Args:
-            field: What field to aggregate.
+            field: What field to aggregate on.
             limit: How many buckets to return.
+            supported_charts: Chart type to render. Defaults to table.
+            order_field: The name of the field that is used for the order
+                of items in the aggregation, defaults to "count".
 
         Returns:
             Instance of interface.AggregationResult with aggregation result.
         """
         self.field = field
+        formatted_field_name = self.format_field_by_type(field)
+
         # Encoding information for Vega-Lite.
         encoding = {
             'x': {
@@ -87,18 +88,21 @@ class TermsAggregation(interface.BaseAggregator):
                 'type': 'nominal',
                 'sort': {
                     'op': 'sum',
-                    'field': 'count',
+                    'field': order_field,
                     'order': 'descending'
                 }
             },
-            'y': {'field': 'count', 'type': 'quantitative'}
+            'y': {'field': 'count', 'type': 'quantitative'},
+            'tooltip': [
+                {'field': field, 'type': 'nominal'},
+                {'field': order_field, 'type': 'quantitative'}],
         }
 
         aggregation_spec = {
             'aggs': {
                 'aggregation': {
                     'terms': {
-                        'field': '{0:s}.keyword'.format(field),
+                        'field': formatted_field_name,
                         'size': limit
                     }
                 }
@@ -114,7 +118,9 @@ class TermsAggregation(interface.BaseAggregator):
             d = {field: bucket['key'], 'count': bucket['doc_count']}
             values.append(d)
 
-        return interface.AggregationResult(encoding, values)
+        return interface.AggregationResult(
+            encoding=encoding, values=values, chart_type=supported_charts,
+            sketch_url=self._sketch_url, field=field)
 
 
 manager.AggregatorManager.register_aggregator(TermsAggregation)

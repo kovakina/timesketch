@@ -21,7 +21,7 @@ import six
 
 from flask_testing import TestCase
 
-from timesketch import create_app
+from timesketch.app import create_app
 from timesketch.lib.definitions import HTTP_STATUS_CODE_REDIRECT
 from timesketch.models import init_db
 from timesketch.models import drop_all
@@ -45,6 +45,7 @@ class TestConfig(object):
     WTF_CSRF_ENABLED = False
     ELASTIC_HOST = None
     ELASTIC_PORT = None
+    LABELS_TO_PREVENT_DELETION = ['protected', 'magic']
     UPLOAD_ENABLED = False
     GRAPH_BACKEND_ENABLED = False
     AUTO_INDEX_ANALYZERS = []
@@ -86,6 +87,9 @@ class MockElasticIndices(object):
     def get_mapping(self, *args, **kwargs):
         """Mock get mapping call."""
         return {}
+
+    def stats(self, *args, **kwargs):
+        return {'indices': {}}
 
 
 class MockDataStore(object):
@@ -190,6 +194,15 @@ class MockDataStore(object):
         """
         return self.event_dict
 
+    @staticmethod
+    def get_filter_labels(sketch_id, indices):
+        """Mock returning a single event from the datastore.
+
+        Returns:
+            A list with label.
+        """
+        return []
+
     def set_label(self,
                   searchindex_id,
                   event_id,
@@ -197,7 +210,8 @@ class MockDataStore(object):
                   sketch_id,
                   user_id,
                   label,
-                  toggle=False):
+                  toggle=False,
+                  single_update=True):
         """Mock adding a label to an event."""
         return
 
@@ -242,7 +256,7 @@ class MockDataStore(object):
 
     # pylint: disable=unused-argument
     def search_stream(self, query_string, query_filter, query_dsl,
-                      indices, return_fields):
+                      indices, return_fields, enable_scroll=True):
         for i in range(len(self.event_store)):
             yield self.event_store[str(i)]
 
@@ -396,6 +410,7 @@ class BaseTest(TestCase):
         if acl:
             for permission in ['read', 'write', 'delete']:
                 searchindex.grant_permission(permission=permission, user=user)
+        searchindex.set_status(status='ready')
         self._commit_to_database(searchindex)
         return searchindex
 
@@ -447,6 +462,7 @@ class BaseTest(TestCase):
             sketch=sketch,
             searchindex=searchindex,
             color=self.COLOR_WHITE)
+        timeline.set_status(status='ready')
         self._commit_to_database(timeline)
         return timeline
 

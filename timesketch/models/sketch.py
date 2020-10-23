@@ -17,15 +17,15 @@ from __future__ import unicode_literals
 
 import json
 
+from flask import current_app
+from flask import url_for
+
 from sqlalchemy import Column
 from sqlalchemy import ForeignKey
 from sqlalchemy import Integer
 from sqlalchemy import Unicode
 from sqlalchemy import UnicodeText
 from sqlalchemy.orm import relationship
-
-from flask import current_app
-from flask import url_for
 
 from timesketch.models import BaseModel
 from timesketch.models.acl import AccessControlMixin
@@ -50,6 +50,8 @@ class Sketch(AccessControlMixin, LabelMixin, StatusMixin, CommentMixin,
     events = relationship('Event', backref='sketch', lazy='select')
     stories = relationship('Story', backref='sketch', lazy='select')
     aggregations = relationship('Aggregation', backref='sketch', lazy='select')
+    aggregationgroups = relationship(
+        'AggregationGroup', backref='sketch', lazy='select')
     analysis = relationship('Analysis', backref='sketch', lazy='select')
 
     def __init__(self, name, description, user):
@@ -67,18 +69,20 @@ class Sketch(AccessControlMixin, LabelMixin, StatusMixin, CommentMixin,
 
     @property
     def get_named_aggregations(self):
-        """Get named aggregations.
+        """Get named aggregations that don't belong to a group.
 
-        Get named aggregations, i.e. only aggregations that have a name.
+        Get named aggregations, i.e. only aggregations that have a name and
+        are not part of a group.
         """
-        return  [
+        return [
             agg for agg in self.aggregations
-            if agg.name != ''
+            if agg.name != '' and not agg.aggregationgroup
         ]
 
     @property
     def get_named_views(self):
-        """
+        """Get named views.
+
         Get named views, i.e. only views that has a name. Views without names
         are used as user state views and should not be visible in the UI.
         """
@@ -130,7 +134,8 @@ class Sketch(AccessControlMixin, LabelMixin, StatusMixin, CommentMixin,
         for timeline in self.timelines:
             timeline_status = timeline.get_status.status
             index_status = timeline.searchindex.get_status.status
-            if (timeline_status or index_status) in ['processing', 'fail']:
+            if (timeline_status or index_status) in (
+                    'processing', 'fail', 'archived'):
                 continue
             _timelines.append(timeline)
         return _timelines
@@ -227,6 +232,7 @@ class View(AccessControlMixin, LabelMixin, StatusMixin, CommentMixin,
            BaseModel):
     """Implements the View model."""
     name = Column(Unicode(255))
+    description = Column(UnicodeText())
     query_string = Column(UnicodeText())
     query_filter = Column(UnicodeText())
     query_dsl = Column(UnicodeText())
@@ -234,11 +240,14 @@ class View(AccessControlMixin, LabelMixin, StatusMixin, CommentMixin,
     sketch_id = Column(Integer, ForeignKey('sketch.id'))
     searchtemplate_id = Column(Integer, ForeignKey('searchtemplate.id'))
     aggregations = relationship('Aggregation', backref='view', lazy='select')
+    aggregationgroups = relationship(
+        'AggregationGroup', backref='view', lazy='select')
 
     def __init__(self,
                  name,
                  sketch,
                  user,
+                 description=None,
                  searchtemplate=None,
                  query_string=None,
                  query_filter=None,
@@ -249,6 +258,7 @@ class View(AccessControlMixin, LabelMixin, StatusMixin, CommentMixin,
             name: The name of the timeline
             sketch: A sketch (instance of timesketch.models.sketch.Sketch)
             user: A user (instance of timesketch.models.user.User)
+            description (str): Description of the view
             searchtemplate: Instance of timesketch.models.sketch.SearchTemplate
             query_string: The query string
             query_filter: The filter to apply (JSON format as string)
@@ -258,6 +268,7 @@ class View(AccessControlMixin, LabelMixin, StatusMixin, CommentMixin,
         self.name = name
         self.sketch = sketch
         self.user = user
+        self.description = description
         self.searchtemplate = searchtemplate
         self.query_string = query_string
         self.query_filter = query_filter
@@ -288,7 +299,8 @@ class View(AccessControlMixin, LabelMixin, StatusMixin, CommentMixin,
             'terminate_after': DEFAULT_LIMIT,
             'indices': [],
             'exclude': [],
-            'order': 'asc'
+            'order': 'asc',
+            'chips': []
         }
         # If not provided, get the saved filter from the view
         if not query_filter:
@@ -313,6 +325,7 @@ class SearchTemplate(AccessControlMixin, LabelMixin, StatusMixin, CommentMixin,
                      BaseModel):
     """Implements the Search Template model."""
     name = Column(Unicode(255))
+    description = Column(UnicodeText())
     query_string = Column(UnicodeText())
     query_filter = Column(UnicodeText())
     query_dsl = Column(UnicodeText())
@@ -322,6 +335,7 @@ class SearchTemplate(AccessControlMixin, LabelMixin, StatusMixin, CommentMixin,
     def __init__(self,
                  name,
                  user,
+                 description=None,
                  query_string=None,
                  query_filter=None,
                  query_dsl=None):
@@ -330,6 +344,7 @@ class SearchTemplate(AccessControlMixin, LabelMixin, StatusMixin, CommentMixin,
         Args:
             name: The name of the timeline
             user: A user (instance of timesketch.models.user.User)
+            description (str): Description of the search template
             query_string: The query string
             query_filter: The filter to apply (JSON format as string)
             query_dsl: A query DSL document (JSON format as string)
@@ -337,6 +352,7 @@ class SearchTemplate(AccessControlMixin, LabelMixin, StatusMixin, CommentMixin,
         super(SearchTemplate, self).__init__()
         self.name = name
         self.user = user
+        self.description = description
         self.query_string = query_string
         if not query_filter:
             filter_template = {
@@ -410,9 +426,10 @@ class Aggregation(AccessControlMixin, LabelMixin, StatusMixin, CommentMixin,
     user_id = Column(Integer, ForeignKey('user.id'))
     sketch_id = Column(Integer, ForeignKey('sketch.id'))
     view_id = Column(Integer, ForeignKey('view.id'))
+    aggregationgroup_id = Column(Integer, ForeignKey('aggregationgroup.id'))
 
     def __init__(self, name, description, agg_type, parameters, chart_type,
-                 user, sketch, view=None):
+                 user, sketch, view=None, aggregationgroup=None):
         """Initialize the Aggregation object.
 
         Args:
@@ -423,14 +440,57 @@ class Aggregation(AccessControlMixin, LabelMixin, StatusMixin, CommentMixin,
             chart_type (str): Chart plugin type
             user (User): The user who created the aggregation
             sketch (Sketch): The sketch that the aggregation is bound to
-            view (View): Optional: The view that the aggregation is bound to
+            view (View): Optional, the view that the aggregation is bound to
+            aggregationgroup (AggregationGroup): Optional, an AggregationGroup
+                that the aggregation is bound to.
         """
         super(Aggregation, self).__init__()
         self.name = name
         self.description = description
         self.agg_type = agg_type
+        self.aggregationgroup = aggregationgroup
         self.parameters = parameters
         self.chart_type = chart_type
+        self.user = user
+        self.sketch = sketch
+        self.view = view
+
+
+class AggregationGroup(
+        AccessControlMixin, LabelMixin, StatusMixin, CommentMixin, BaseModel):
+    """Implements the Aggregation Group model."""
+    name = Column(Unicode(255))
+    description = Column(UnicodeText())
+    aggregations = relationship(
+        'Aggregation', backref='aggregationgroup', lazy='select')
+    parameters = Column(UnicodeText())
+    orientation = Column(Unicode(40))
+    user_id = Column(Integer, ForeignKey('user.id'))
+    sketch_id = Column(Integer, ForeignKey('sketch.id'))
+    view_id = Column(Integer, ForeignKey('view.id'))
+
+    def __init__(
+            self, name, description, user, sketch, aggregations=None,
+            parameters='', orientation='', view=None):
+        """Initialize the AggregationGroup object.
+
+        Args:
+            name (str): Name of the aggregation
+            description (str): Description of the aggregation
+            user (User): The user who created the aggregation
+            sketch (Sketch): The sketch that the aggregation is bound to
+            aggregations (Aggregation): List of aggregation objects.
+            parameters (str): A JSON formatted dict with parameters for
+                charting.
+            orientation (str): Describes how charts should be joined together.
+            view (View): Optional: The view that the aggregation is bound to
+        """
+        super(AggregationGroup, self).__init__()
+        self.name = name
+        self.description = description
+        self.aggregations = aggregations or []
+        self.parameters = parameters
+        self.orientation = orientation
         self.user = user
         self.sketch = sketch
         self.view = view

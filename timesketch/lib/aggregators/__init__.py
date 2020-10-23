@@ -15,4 +15,6 @@
 
 # Register all aggregators here by importing them.
 from timesketch.lib.aggregators import bucket
+from timesketch.lib.aggregators import feed
 from timesketch.lib.aggregators import term
+from timesketch.lib.aggregators import vega

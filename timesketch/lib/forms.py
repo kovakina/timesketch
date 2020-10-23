@@ -16,9 +16,6 @@
 from __future__ import unicode_literals
 
 from flask_wtf import FlaskForm
-from flask_wtf.file import FileAllowed
-from flask_wtf.file import FileField
-from flask_wtf.file import FileRequired
 from wtforms import widgets
 from wtforms.fields import BooleanField
 from wtforms.fields import HiddenField
@@ -129,6 +126,8 @@ class CreateTimelineForm(BaseForm):
 
 class TimelineForm(NameDescriptionForm):
     """Form to edit a timeline."""
+    labels = StringField('Labels', validators=[Optional()])
+    label_action = StringField('LabelAction', validators=[Optional()])
     color = StringField(
         'Color',
         validators=[DataRequired(),
@@ -173,6 +172,7 @@ class ExploreForm(BaseForm):
     enable_scroll = BooleanField(
         'Enable scroll', false_values={False, 'false', ''}, default=False)
     scroll_id = StringField('Scroll ID', default='')
+    file_name = StringField('Export to File')
 
 
 class GraphExploreForm(BaseForm):
@@ -180,16 +180,6 @@ class GraphExploreForm(BaseForm):
     graph_view_id = IntegerField('Query ID')
     parameters = StringField('Parameters')
     output_format = StringField('Output format')
-
-
-class SaveAggregationForm(BaseForm):
-    """Form used to save an aggregation."""
-    name = StringField('Name')
-    description = StringField('Description')
-    agg_type = StringField('Aggregation Type')
-    parameters = StringField('Aggregation parameters')
-    chart_type = StringField('Chart plugin type')
-    view_id = IntegerField('Attach to View')
 
 
 class AggregationExploreForm(BaseForm):
@@ -223,34 +213,13 @@ class TrashViewForm(BaseForm):
     view_id = IntegerField('View ID', validators=[DataRequired()])
 
 
-class EventCreateForm(BaseForm):
-    """Generic form to handle event addition. E.g. message and timestamp."""
-    timestamp = StringField('timestamp', validators=[DataRequired()])
-    timestamp_desc = StringField('timestamp_desc', validators=[DataRequired()])
-    message = StringField('message', validators=[DataRequired()])
-
-
 class EventAnnotationForm(BaseForm):
     """Generic form to handle event annotation. E.g. comment and labels."""
     annotation = StringField('Annotation', validators=[DataRequired()])
     annotation_type = StringField('Type', validators=[DataRequired()])
     events = StringField('Events', validators=[DataRequired()])
-
-
-class UploadFileForm(BaseForm):
-    """Form to handle file uploads."""
-    file = FileField(
-        'file',
-        validators=[
-            FileRequired(),
-            FileAllowed(['plaso', 'csv', 'jsonl'],
-                        'Allowed file extensions: .plaso, .csv, or .jsonl')
-        ])
-    name = StringField('Timeline name', validators=[Optional()])
-    sketch_id = IntegerField('Sketch ID', validators=[Optional()])
-    index_name = StringField('Index Name', validators=[Optional()])
-    enable_stream = BooleanField(
-        'Enable stream', false_values={False, 'false', ''}, default=False)
+    remove = BooleanField(
+        'Remove', false_values={False, 'false', ''}, default=False)
 
 
 class StoryForm(BaseForm):

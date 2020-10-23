@@ -55,7 +55,7 @@ def get_spec(field, query='', query_dsl=''):
     elif query_dsl:
         query_filter = query_dsl
     else:
-        raise ValueError('Neiter query nor query DSL provided.')
+        raise ValueError('Neither query nor query DSL provided.')
 
     return {
         'aggregations': {
@@ -64,7 +64,7 @@ def get_spec(field, query='', query_dsl=''):
                 'aggregations': {
                     'term_count': {
                         'terms': {
-                            'field': '{0:s}.keyword'.format(field)
+                            'field': field
                         }
                     }
                 }
@@ -77,48 +77,43 @@ class FilteredTermsAggregation(interface.BaseAggregator):
     """Query Filter Term Aggregation."""
 
     NAME = 'query_bucket'
+    DISPLAY_NAME = 'Filtered Terms Aggregation'
     DESCRIPTION = 'Aggregating values of a field after applying a filter'
 
-    SUPPORTED_CHARTS = frozenset(['barchart', 'hbarchart'])
+    SUPPORTED_CHARTS = frozenset(
+        ['barchart', 'circlechart', 'hbarchart', 'linechart', 'table'])
 
     FORM_FIELDS = [
         {
             'type': 'ts-dynamic-form-select-input',
             'name': 'supported_charts',
             'label': 'Chart type to render',
-            'options': list(SUPPORTED_CHARTS)
+            'options': list(SUPPORTED_CHARTS),
+            'display': True
         },
         {
             'name': 'query_string',
             'type': 'ts-dynamic-form-text-input',
             'label': 'The filter query to narrow down the result set',
             'placeholder': 'Query',
-            'default_value': ''
+            'default_value': '',
+            'display': True
         },
         {
             'name': 'query_dsl',
             'type': 'ts-dynamic-form-text-input',
             'label': 'The filter query DSL to narrow down the result',
             'placeholder': 'Query DSL',
-            'default_value': ''
+            'default_value': '',
+            'display': False
         },
         {
             'name': 'field',
             'type': 'ts-dynamic-form-text-input',
             'label': 'What field to aggregate.',
+            'display': True
         }
     ]
-
-    def __init__(self, sketch_id=None, index=None):
-        """Initialize the aggregator object.
-
-        Args:
-            sketch_id: Sketch ID.
-            index: List of elasticsearch index names.
-        """
-        super(FilteredTermsAggregation, self).__init__(
-            sketch_id=sketch_id, index=index)
-        self.field = ''
 
     @property
     def chart_title(self):
@@ -128,7 +123,9 @@ class FilteredTermsAggregation(interface.BaseAggregator):
         return 'Top results for an unknown field after filtering'
 
     # pylint: disable=arguments-differ
-    def run(self, field, query_string='', query_dsl=''):
+    def run(
+            self, field, query_string='', query_dsl='',
+            supported_charts='table'):
         """Run the aggregation.
 
         Args:
@@ -139,6 +136,7 @@ class FilteredTermsAggregation(interface.BaseAggregator):
             query_dsl (str): the query DSL field to run on all documents prior
                 to aggregating the results. Either a query string or a query
                 DSL has to be present.
+            supported_charts: Chart type to render. Defaults to table.
 
         Returns:
             Instance of interface.AggregationResult with aggregation result.
@@ -150,8 +148,10 @@ class FilteredTermsAggregation(interface.BaseAggregator):
             raise ValueError('Both query_string and query_dsl are missing')
 
         self.field = field
+        formatted_field_name = self.format_field_by_type(field)
+
         aggregation_spec = get_spec(
-            field=field, query=query_string, query_dsl=query_dsl)
+            field=formatted_field_name, query=query_string, query_dsl=query_dsl)
 
         # Encoding information for Vega-Lite.
         encoding = {
@@ -164,7 +164,10 @@ class FilteredTermsAggregation(interface.BaseAggregator):
                     'order': 'descending'
                 }
             },
-            'y': {'field': 'count', 'type': 'quantitative'}
+            'y': {'field': 'count', 'type': 'quantitative'},
+            'tooltip': [
+                {'field': field, 'type': 'nominal'},
+                {'field': 'count', 'type': 'quantitative'}],
         }
 
         response = self.elastic_aggregation(aggregation_spec)
@@ -185,7 +188,15 @@ class FilteredTermsAggregation(interface.BaseAggregator):
             }
             values.append(d)
 
-        return interface.AggregationResult(encoding, values)
+        if query_string:
+            extra_query_url = 'AND {0:s}'.format(query_string)
+        else:
+            extra_query_url = ''
+
+        return interface.AggregationResult(
+            encoding=encoding, values=values, chart_type=supported_charts,
+            sketch_url=self._sketch_url, field=field,
+            extra_query_url=extra_query_url)
 
 
 manager.AggregatorManager.register_aggregator(FilteredTermsAggregation)
