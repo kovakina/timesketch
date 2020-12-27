@@ -14,7 +14,7 @@ class PotentialBruteforceSketchPlugin(interface.BaseSketchAnalyzer):
     """Sketch analyzer for Potential Bruteforce."""
 
     NAME = 'potential_bruteforce'
-	
+
 
     def __init__(self, index_name, sketch_id):
         """Initialize The Sketch Analyzer.
@@ -25,7 +25,7 @@ class PotentialBruteforceSketchPlugin(interface.BaseSketchAnalyzer):
         self.index_name = index_name
         super(PotentialBruteforceSketchPlugin, self).__init__(
             index_name, sketch_id)
-	
+
 
 
     def run(self):
@@ -63,7 +63,7 @@ class PotentialBruteforceSketchPlugin(interface.BaseSketchAnalyzer):
             message = event.source.get('message')
             ip_address = re.findall(r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}', message)
 	    if ip_address:
-                event.add_attributes({'ip_address': ip_address})
+            event.add_attributes({'ip_address': ip_address})
             if ip_address is None:
                 continue
 	    username = re.search(r'Invalid user ([a-zA-Z0-9_\.+\-]{1,32}) from', message)
