@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""View resources for version 1 of the Timesketch API."""
+"""Explore resources for version 1 of the Timesketch API."""
 
 import datetime
 import io
@@ -157,15 +157,19 @@ class ExploreResource(resources.ResourceMixin, Resource):
             result = self.datastore.client.scroll(
                 scroll_id=scroll_id, scroll='1m')
         else:
-            result = self.datastore.search(
-                sketch_id,
-                form.query.data,
-                query_filter,
-                query_dsl,
-                indices,
-                aggregations=index_stats_agg,
-                return_fields=return_fields,
-                enable_scroll=enable_scroll)
+            try:
+                result = self.datastore.search(
+                    sketch_id,
+                    form.query.data,
+                    query_filter,
+                    query_dsl,
+                    indices,
+                    aggregations=index_stats_agg,
+                    return_fields=return_fields,
+                    enable_scroll=enable_scroll)
+            except ValueError as e:
+                abort(
+                    HTTP_STATUS_CODE_BAD_REQUEST, e)
 
         # Get number of matching documents per index.
         count_per_index = {}
@@ -193,8 +197,11 @@ class ExploreResource(resources.ResourceMixin, Resource):
 
         # Update or create user state view. This is used in the UI to let
         # the user get back to the last state in the explore view.
+        # TODO: Add a call to utils.update_sketch_last_activity once new
+        # mechanism has been added, instead of relying on user views.
         view = View.get_or_create(
             user=current_user, sketch=sketch, name='')
+        view.update_modification_time()
         view.query_string = form.query.data
         view.query_filter = json.dumps(query_filter, ensure_ascii=False)
         view.query_dsl = json.dumps(query_dsl, ensure_ascii=False)

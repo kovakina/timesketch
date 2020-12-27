@@ -45,6 +45,10 @@ class TestConfig(object):
     WTF_CSRF_ENABLED = False
     ELASTIC_HOST = None
     ELASTIC_PORT = None
+    ELASTIC_USER = None
+    ELASTIC_PASSWORD = None
+    ELASTIC_SSL = False
+    ELASTIC_VERIFY_CERTS = True
     LABELS_TO_PREVENT_DELETION = ['protected', 'magic']
     UPLOAD_ENABLED = False
     GRAPH_BACKEND_ENABLED = False
@@ -193,6 +197,18 @@ class MockDataStore(object):
             A dictionary with event data.
         """
         return self.event_dict
+
+    @staticmethod
+    def count(indices):
+        """Mock returning a single event from the datastore.
+
+        Args:
+            indices: List of indices.
+
+        Returns:
+            A tuple with count and bytes.
+        """
+        return 1, 1
 
     @staticmethod
     def get_filter_labels(sketch_id, indices):

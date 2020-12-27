@@ -24,6 +24,7 @@ from uuid import uuid4
 
 import six
 
+from dateutil import parser, relativedelta
 from elasticsearch import Elasticsearch
 from elasticsearch.exceptions import ConnectionTimeout
 from elasticsearch.exceptions import NotFoundError
@@ -31,6 +32,7 @@ from elasticsearch.exceptions import RequestError
 # pylint: disable=redefined-builtin
 from elasticsearch.exceptions import ConnectionError
 from flask import abort
+from flask import current_app
 
 from timesketch.lib.definitions import HTTP_STATUS_CODE_NOT_FOUND
 
@@ -74,9 +76,22 @@ class ElasticsearchDataStore(object):
 
     def __init__(self, host='127.0.0.1', port=9200):
         """Create a Elasticsearch client."""
-        super(ElasticsearchDataStore, self).__init__()
+        super().__init__()
         self._error_container = {}
-        self.client = Elasticsearch([{'host': host, 'port': port}])
+
+        self.user = current_app.config.get('ELASTIC_USER', 'user')
+        self.password = current_app.config.get('ELASTIC_PASSWORD', 'pass')
+        self.ssl = current_app.config.get('ELASTIC_SSL', False)
+        self.verify = current_app.config.get('ELASTIC_VERIFY_CERTS', True)
+
+        if self.ssl:
+            self.client = Elasticsearch([{'host': host, 'port': port}],
+                                        http_auth=(self.user, self.password),
+                                        use_ssl=self.ssl,
+                                        verify_certs=self.verify)
+        else:
+            self.client = Elasticsearch([{'host': host, 'port': port}])
+
         self.import_counter = Counter()
         self.import_events = []
 
@@ -133,6 +148,50 @@ class ElasticsearchDataStore(object):
         query_dict = {'query': {'ids': {'values': events_list}}}
         return query_dict
 
+    @staticmethod
+    def _convert_to_time_range(interval):
+        """Convert an interval timestamp into start and end dates.
+
+        Args:
+            interval: Time frame representation
+
+        Returns:
+            Start timestamp in string format.
+            End timestamp in string format.
+        """
+        # return ('2018-12-05T00:00:00', '2018-12-05T23:59:59')
+        TS_FORMAT = '%Y-%m-%dT%H:%M:%S'
+        get_digits = lambda s: int(''.join(filter(str.isdigit, s)))
+        get_alpha = lambda s: ''.join(filter(str.isalpha, s))
+
+        ts_parts = interval.split(' ')
+        # The start date could be 1 or 2 first items
+        start = ' '.join(ts_parts[0:len(ts_parts)-2])
+        minus = get_digits(ts_parts[-2])
+        plus = get_digits(ts_parts[-1])
+        interval = get_alpha(ts_parts[-1])
+
+        start_ts = parser.parse(start)
+
+        rd = relativedelta.relativedelta
+        if interval == 's':
+            start_range = start_ts - rd(seconds=minus)
+            end_range = start_ts + rd(seconds=plus)
+        elif interval == 'm':
+            start_range = start_ts - rd(minutes=minus)
+            end_range = start_ts + rd(minutes=plus)
+        elif interval == 'h':
+            start_range = start_ts - rd(hours=minus)
+            end_range = start_ts + rd(hours=plus)
+        elif interval == 'd':
+            start_range = start_ts - rd(days=minus)
+            end_range = start_ts + rd(days=plus)
+        else:
+            raise RuntimeError('Unable to parse the timestamp: '
+                               + str(interval))
+
+        return start_range.strftime(TS_FORMAT), end_range.strftime(TS_FORMAT)
+
     def build_query(self, sketch_id, query_string, query_filter, query_dsl=None,
                     aggregations=None):
         """Build Elasticsearch DSL query.
@@ -149,7 +208,11 @@ class ElasticsearchDataStore(object):
         """
 
         if query_dsl:
-            query_dsl = json.loads(query_dsl)
+            if not isinstance(query_dsl, dict):
+                query_dsl = json.loads(query_dsl)
+
+            if not query_dsl:
+                query_dsl = {}
             # Remove any aggregation coming from user supplied Query DSL.
             # We have no way to display this data in a good way today.
             if query_dsl.get('aggregations', None):
@@ -230,10 +293,8 @@ class ElasticsearchDataStore(object):
                     elif chip['operator'] == 'must_not':
                         must_not_filters.append(term_filter)
 
-                elif chip['type'] == 'datetime_range':
-                    start = chip['value'].split(',')[0]
-                    end = chip['value'].split(',')[1]
-                    range_filter = {
+                elif chip['type'].startswith('datetime'):
+                    range_filter = lambda start, end: {
                         'range': {
                             'datetime': {
                                 'gte': start,
@@ -241,7 +302,14 @@ class ElasticsearchDataStore(object):
                             }
                         }
                     }
-                    datetime_ranges['bool']['should'].append(range_filter)
+                    if chip['type'] == 'datetime_range':
+                        start, end = chip['value'].split(',')
+                    elif chip['type'] == 'datetime_interval':
+                        start, end = self._convert_to_time_range(chip['value'])
+                    else:
+                        continue
+                    datetime_ranges['bool']['should'].append(
+                        range_filter(start, end))
 
             label_filter = self._build_labels_query(sketch_id, labels)
             must_filters.append(label_filter)
@@ -337,20 +405,37 @@ class ElasticsearchDataStore(object):
         # The argument " _source_include" changed to "_source_includes" in
         # ES version 7. This check add support for both version 6 and 7 clients.
         # pylint: disable=unexpected-keyword-arg
-        if self.version.startswith('6'):
-            _search_result = self.client.search(
-                body=query_dsl,
-                index=list(indices),
-                search_type=search_type,
-                _source_include=return_fields,
-                scroll=scroll_timeout)
-        else:
-            _search_result = self.client.search(
-                body=query_dsl,
-                index=list(indices),
-                search_type=search_type,
-                _source_includes=return_fields,
-                scroll=scroll_timeout)
+        try:
+            if self.version.startswith('6'):
+                _search_result = self.client.search(
+                    body=query_dsl,
+                    index=list(indices),
+                    search_type=search_type,
+                    _source_include=return_fields,
+                    scroll=scroll_timeout)
+            else:
+                _search_result = self.client.search(
+                    body=query_dsl,
+                    index=list(indices),
+                    search_type=search_type,
+                    _source_includes=return_fields,
+                    scroll=scroll_timeout)
+        except RequestError as e:
+            root_cause = e.info.get('error', {}).get('root_cause')
+            if root_cause:
+                error_items = []
+                for cause in root_cause:
+                    error_items.append(
+                        '[{0:s}] {1:s}'.format(
+                            cause.get('type', ''), cause.get('reason', '')))
+                cause = ', '.join(error_items)
+            else:
+                cause = str(e)
+
+            es_logger.error(
+                'Unable to run search query: {0:s}'.format(cause),
+                exc_info=True)
+            raise ValueError(cause) from e
 
         return _search_result
 
@@ -512,18 +597,27 @@ class ElasticsearchDataStore(object):
             indices: List of indices.
 
         Returns:
-            Number of documents.
+            Tuple containing number of documents and size on disk.
         """
         if not indices:
-            return 0
+            return 0, 0
+
         try:
-            result = self.client.count(index=indices)
-        except (NotFoundError, RequestError):
+            es_stats = self.client.indices.stats(
+                index=indices, metric='docs, store')
+        except NotFoundError:
             es_logger.error(
                 'Unable to count indexes (index not found)',
                 exc_info=True)
-            return 0
-        return result.get('count', 0)
+            es_stats = {}
+
+        doc_count_total = es_stats.get(
+            '_all', {}).get('primaries', {}).get('docs', {}).get('count', 0)
+        doc_bytes_total = es_stats.get(
+            '_all', {}).get(
+            'primaries', {}).get('store', {}).get('size_in_bytes', 0)
+
+        return doc_count_total, doc_bytes_total
 
     def set_label(self, searchindex_id, event_id, event_type, sketch_id,
                   user_id, label, toggle=False, remove=False,
@@ -620,8 +714,9 @@ class ElasticsearchDataStore(object):
             try:
                 self.client.indices.create(
                     index=index_name, body={'mappings': _document_mapping})
-            except ConnectionError:
-                raise RuntimeError('Unable to connect to Timesketch backend.')
+            except ConnectionError as e:
+                raise RuntimeError(
+                    'Unable to connect to Timesketch backend.') from e
             except RequestError:
                 index_exists = self.client.indices.exists(index_name)
                 es_logger.warning(
@@ -650,7 +745,7 @@ class ElasticsearchDataStore(object):
             except ConnectionError as e:
                 raise RuntimeError(
                     'Unable to connect to Timesketch backend: {}'.format(e)
-                )
+                ) from e
 
     def import_event(self, index_name, event_type, event=None, event_id=None,
                      flush_interval=DEFAULT_FLUSH_INTERVAL):
@@ -764,7 +859,7 @@ class ElasticsearchDataStore(object):
 
                 error = index.get('error', {})
                 status_code = index.get('status', 0)
-                doc_id = index.get('_id', '')
+                doc_id = index.get('_id', '(unable to get doc id)')
                 caused_by = error.get('caused_by', {})
 
                 caused_reason = caused_by.get(
@@ -784,10 +879,17 @@ class ElasticsearchDataStore(object):
                     caused_reason,
                 )
                 error_list.append(error_msg)
-                es_logger.error(
-                    'Unable to upload document: {0:s} to index {1:s} - '
-                    '[{2:d}] {3:s}'.format(
-                        doc_id, index_name, status_code, error_msg))
+                try:
+                    es_logger.error(
+                        'Unable to upload document: {0:s} to index {1:s} - '
+                        '[{2:d}] {3:s}'.format(
+                            doc_id, index_name, status_code, error_msg))
+                # We need to catch all exceptions here, since this is a crucial
+                # call that we do not want to break operation.
+                except Exception:  # pylint: disable=broad-except
+                    es_logger.error(
+                        'Unable to upload document, and unable to log the '
+                        'error itself.', exc_info=True)
 
         return_dict['error_container'] = self._error_container
 

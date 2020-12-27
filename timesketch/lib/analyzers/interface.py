@@ -31,6 +31,8 @@ from timesketch.lib import definitions
 from timesketch.lib.datastores.elastic import ElasticsearchDataStore
 from timesketch.models import db_session
 from timesketch.models.sketch import Aggregation
+from timesketch.models.sketch import Attribute
+from timesketch.models.sketch import AttributeValue
 from timesketch.models.sketch import AggregationGroup as SQLAggregationGroup
 from timesketch.models.sketch import Event as SQLEvent
 from timesketch.models.sketch import Sketch as SQLSketch
@@ -133,7 +135,7 @@ class Event(object):
             self.index_name = event['_index']
             self.source = event.get('_source', None)
         except KeyError as e:
-            raise KeyError('Malformed event: {0!s}'.format(e))
+            raise KeyError('Malformed event: {0!s}'.format(e)) from e
 
     def _update(self, event):
         """Update event attributes to add.
@@ -160,7 +162,7 @@ class Event(object):
 
         self.datastore.import_event(
             self.index_name, self.event_type, event_id=self.event_id,
-            event=event_to_commit)
+            event=event_to_commit, flush_interval=1)
         self.updated_event = {}
 
     def add_attributes(self, attributes):
@@ -403,6 +405,41 @@ class Sketch(object):
         db_session.add(view)
         db_session.commit()
         return view
+
+    def add_sketch_attribute(self, name, values, ontology='text'):
+        """Add an attribute to the sketch.
+
+        Args:
+            name (str): The name of the attribute
+            values (list): A list of strings, which contains the values of the
+                attribute.
+            ontology (str): Ontology of the attribute, matches with
+                data/ontology.yaml.
+        """
+        # Check first whether the attribute already exists.
+        attribute = Attribute.query.filter_by(name=name).first()
+
+        if not attribute:
+            attribute = Attribute(
+                user=None,
+                sketch=self.sql_sketch,
+                name=name,
+                ontology=ontology)
+            db_session.add(attribute)
+            db_session.commit()
+
+        for value in values:
+            attribute_value = AttributeValue(
+                user=None,
+                attribute=attribute,
+                value=value)
+
+            attribute.values.append(attribute_value)
+            db_session.add(attribute_value)
+            db_session.commit()
+
+        db_session.add(attribute)
+        db_session.commit()
 
     def add_story(self, title):
         """Add a story to the Sketch.
@@ -845,7 +882,7 @@ class BaseSketchAnalyzer(BaseIndexAnalyzer):
             sketch_id: Sketch ID.
         """
         self.sketch = Sketch(sketch_id=sketch_id)
-        super(BaseSketchAnalyzer, self).__init__(index_name)
+        super().__init__(index_name)
 
     def event_pandas(
             self, query_string=None, query_filter=None, query_dsl=None,

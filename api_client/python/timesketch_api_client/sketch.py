@@ -24,10 +24,11 @@ from . import analyzer
 from . import aggregation
 from . import definitions
 from . import error
+from . import graph
 from . import resource
+from . import search
 from . import story
 from . import timeline
-from . import view as view_lib
 
 
 logging.basicConfig(level=os.environ.get('LOGLEVEL', 'INFO'))
@@ -60,119 +61,7 @@ class Sketch(resource.BaseResource):
         self._archived = None
         self._sketch_name = sketch_name
         self._resource_uri = 'sketches/{0:d}'.format(self.id)
-        super(Sketch, self).__init__(api=api, resource_uri=self._resource_uri)
-
-    @property
-    def acl(self):
-        """Property that returns back a ACL dict."""
-        data = self.lazyload_data()
-        objects = data.get('objects')
-        if not objects:
-            return {}
-        data_object = objects[0]
-        permission_string = data_object.get('all_permissions')
-        if not permission_string:
-            return {}
-        return json.loads(permission_string)
-
-    @property
-    def my_acl(self):
-        """Property that returns back the ACL for the current user."""
-        data = self.lazyload_data()
-        objects = data.get('objects')
-        if not objects:
-            return []
-        data_object = objects[0]
-        permission_string = data_object.get('my_permissions')
-        if not permission_string:
-            return []
-        return json.loads(permission_string)
-
-    @property
-    def labels(self):
-        """Property that returns the sketch labels."""
-        data = self.lazyload_data(refresh_cache=True)
-        objects = data.get('objects', [])
-        if not objects:
-            return []
-
-        sketch_data = objects[0]
-        label_string = sketch_data.get('label_string', '')
-        if label_string:
-            return json.loads(label_string)
-
-        return []
-
-    @property
-    def name(self):
-        """Property that returns sketch name.
-
-        Returns:
-            Sketch name as string.
-        """
-        if not self._sketch_name:
-            sketch = self.lazyload_data()
-            self._sketch_name = sketch['objects'][0]['name']
-        return self._sketch_name
-
-    @name.setter
-    def name(self, name_value):
-        """Change the name of the sketch to a new value."""
-        if not isinstance(name_value, str):
-            logger.error('Unable to change the name to a non string value')
-            return
-
-        resource_url = '{0:s}/sketches/{1:d}/'.format(
-            self.api.api_root, self.id)
-
-        data = {
-            'name': name_value,
-        }
-        response = self.api.session.post(resource_url, json=data)
-        _ = error.check_return_status(response, logger)
-
-        # Force the new name to be re-loaded.
-        self._sketch_name = ''
-        _ = self.lazyload_data(refresh_cache=True)
-
-    @property
-    def description(self):
-        """Property that returns sketch description.
-
-        Returns:
-            Sketch description as string.
-        """
-        sketch = self.lazyload_data()
-        return sketch['objects'][0]['description']
-
-    @description.setter
-    def description(self, description_value):
-        """Change the sketch description to a new value."""
-        if not isinstance(description_value, str):
-            logger.error('Unable to change the name to a non string value')
-            return
-
-        resource_url = '{0:s}/sketches/{1:d}/'.format(
-            self.api.api_root, self.id)
-
-        data = {
-            'description': description_value,
-        }
-        response = self.api.session.post(resource_url, json=data)
-        _ = error.check_return_status(response, logger)
-
-        # Force the new description to be re-loaded.
-        _ = self.lazyload_data(refresh_cache=True)
-
-    @property
-    def status(self):
-        """Property that returns sketch status.
-
-        Returns:
-            Sketch status as string.
-        """
-        sketch = self.lazyload_data()
-        return sketch['objects'][0]['status'][0]['status']
+        super().__init__(api=api, resource_uri=self._resource_uri)
 
     def _build_pandas_dataframe(self, search_response, return_fields=None):
         """Return a Pandas DataFrame from a query result dict.
@@ -226,6 +115,220 @@ class Sketch(resource.BaseResource):
 
         return data_frame
 
+    @property
+    def acl(self):
+        """Property that returns back a ACL dict."""
+        data = self.lazyload_data()
+        objects = data.get('objects')
+        if not objects:
+            return {}
+        data_object = objects[0]
+        permission_string = data_object.get('all_permissions')
+        if not permission_string:
+            return {}
+        return json.loads(permission_string)
+
+    @property
+    def attributes(self):
+        """Property that returns the sketch attributes."""
+        data = self.lazyload_data(refresh_cache=True)
+        meta = data.get('meta', {})
+        return_dict = {}
+        for items in meta.get('attributes', []):
+            name, values, ontology = items
+            return_dict[name] = (values, ontology)
+
+        return return_dict
+
+    @property
+    def attributes_table(self):
+        """Property that returns the sketch attributes as a data frame."""
+        data = self.lazyload_data(refresh_cache=True)
+        meta = data.get('meta', {})
+        attributes = meta.get('attributes', [])
+
+        data_frame = pandas.DataFrame(attributes)
+        data_frame.columns = ['attribute', 'values', 'ontology']
+
+        return data_frame
+
+    @property
+    def description(self):
+        """Property that returns sketch description.
+
+        Returns:
+            Sketch description as string.
+        """
+        sketch = self.lazyload_data()
+        return sketch['objects'][0]['description']
+
+    @description.setter
+    def description(self, description_value):
+        """Change the sketch description to a new value."""
+        if not isinstance(description_value, str):
+            logger.error('Unable to change the name to a non string value')
+            return
+
+        resource_url = '{0:s}/sketches/{1:d}/'.format(
+            self.api.api_root, self.id)
+
+        data = {
+            'description': description_value,
+        }
+        response = self.api.session.post(resource_url, json=data)
+        _ = error.check_return_status(response, logger)
+
+        # Force the new description to be re-loaded.
+        _ = self.lazyload_data(refresh_cache=True)
+
+    @property
+    def labels(self):
+        """Property that returns the sketch labels."""
+        data = self.lazyload_data(refresh_cache=True)
+        objects = data.get('objects', [])
+        if not objects:
+            return []
+
+        sketch_data = objects[0]
+        label_string = sketch_data.get('label_string', '')
+        if label_string:
+            return json.loads(label_string)
+
+        return []
+
+    @property
+    def last_activity(self):
+        """Property that returns the last activity.
+
+        Returns:
+            Sketch last activity as a string.
+        """
+        data = self.lazyload_data(refresh_cache=True)
+        meta = data.get('meta', {})
+        return meta.get('last_activity', '')
+
+    @property
+    def my_acl(self):
+        """Property that returns back the ACL for the current user."""
+        data = self.lazyload_data()
+        objects = data.get('objects')
+        if not objects:
+            return []
+        data_object = objects[0]
+        permission_string = data_object.get('my_permissions')
+        if not permission_string:
+            return []
+        return json.loads(permission_string)
+
+    @property
+    def name(self):
+        """Property that returns sketch name.
+
+        Returns:
+            Sketch name as string.
+        """
+        if not self._sketch_name:
+            sketch = self.lazyload_data()
+            self._sketch_name = sketch['objects'][0]['name']
+        return self._sketch_name
+
+    @name.setter
+    def name(self, name_value):
+        """Change the name of the sketch to a new value."""
+        if not isinstance(name_value, str):
+            logger.error('Unable to change the name to a non string value')
+            return
+
+        resource_url = '{0:s}/sketches/{1:d}/'.format(
+            self.api.api_root, self.id)
+
+        data = {
+            'name': name_value,
+        }
+        response = self.api.session.post(resource_url, json=data)
+        _ = error.check_return_status(response, logger)
+
+        # Force the new name to be re-loaded.
+        self._sketch_name = ''
+        _ = self.lazyload_data(refresh_cache=True)
+
+    @property
+    def status(self):
+        """Property that returns sketch status.
+
+        Returns:
+            Sketch status as string.
+        """
+        sketch = self.lazyload_data()
+        return sketch['objects'][0]['status'][0]['status']
+
+    def add_attribute_list(self, name, values, ontology='text'):
+        """Add an attribute to the sketch.
+
+        Args:
+            name (str): The name of the attribute.
+            values (list): A list of string values of the attribute.
+            ontology (str): The ontology (matches with
+                /etc/ontology.yaml), which defines how the attribute
+                is interpreted.
+
+        Raises:
+            ValueError: If any of the parameters are of the wrong type.
+
+        Returns:
+            Boolean value whether the attribute was successfully
+            added or not.
+        """
+        if not isinstance(name, str):
+            raise ValueError('Name needs to be a string.')
+
+        if not isinstance(values, (list, tuple)):
+            if any([not isinstance(x, str) for x in values]):
+                raise ValueError('All values need to be a string.')
+
+        if not isinstance(ontology, str):
+            raise ValueError('Ontology needs to be a string.')
+
+        resource_url = '{0:s}/sketches/{1:d}/attribute/'.format(
+            self.api.api_root, self.id)
+
+        data = {
+            'name': name,
+            'values': values,
+            'ontology': ontology,
+            'action': 'post',
+        }
+        response = self.api.session.post(resource_url, json=data)
+
+        status = error.check_return_status(response, logger)
+        if not status:
+            logger.error('Unable to add the attribute to the sketch.')
+
+        return status
+
+    def add_attribute(self, name, value, ontology='text'):
+        """Add an attribute to the sketch.
+
+        Args:
+            name (str): The name of the attribute.
+            value (str): Value of the attribute, stored as a string.
+            ontology (str): The ontology (matches with
+                /etc/timesketch/ontology.yaml), which defines
+                how the attribute is interpreted.
+
+        Raises:
+            ValueError: If any of the parameters are of the wrong type.
+
+        Returns:
+            Boolean value whether the attribute was successfully
+            added or not.
+        """
+        if not isinstance(name, str):
+            raise ValueError('Name needs to be a string.')
+
+        return self.add_attribute_list(
+            name=name, values=[value], ontology=ontology)
+
     def add_sketch_label(self, label):
         """Add a label to the sketch.
 
@@ -253,6 +356,38 @@ class Sketch(resource.BaseResource):
         status = error.check_return_status(response, logger)
         if not status:
             logger.error('Unable to add the label to the sketch.')
+
+        return status
+
+    def remove_attribute(self, name):
+        """Remove an attribute from the sketch.
+
+        Args:
+            name (str): The name of the attribute.
+
+        Raises:
+            ValueError: If any of the parameters are of the wrong type.
+
+        Returns:
+            Boolean value whether the attribute was successfully
+            removed or not.
+        """
+        if not isinstance(name, str):
+            raise ValueError('Name needs to be a string.')
+
+        resource_url = '{0:s}/sketches/{1:d}/attribute/'.format(
+            self.api.api_root, self.id)
+
+        data = {
+            'name': name,
+            'ontology': 'text',
+            'action': 'delete',
+        }
+        response = self.api.session.post(resource_url, json=data)
+
+        status = error.check_return_status(response, logger)
+        if not status:
+            logger.error('Unable to remove the attriubute from the sketch.')
 
         return status
 
@@ -303,50 +438,29 @@ class Sketch(resource.BaseResource):
             ValueError: if neither query_string nor query_dsl is provided or
                 if query_filter is not a dict.
             RuntimeError: if a view wasn't created for some reason.
+
+        Returns:
+            A search.Search object that has been saved to the database.
         """
+        logger.warning(
+            'View objects will be deprecated shortly, use search.Search '
+            'and call the search_obj.save() function to save a search.')
+
         if not (query_string or query_dsl):
             raise ValueError('You need to supply a query string or a dsl')
 
         if self.is_archived():
             raise RuntimeError('Unable create a view on an archived sketch.')
 
-        resource_url = '{0:s}/sketches/{1:d}/views/'.format(
-            self.api.api_root, self.id)
-
-        if not query_filter:
-            query_filter = {
-                'time_start': None,
-                'time_end': None,
-                'size': 100,
-                'terminate_after': 100,
-                'indices': '_all',
-                'order': 'asc'
-            }
-
-        if not isinstance(query_filter, dict):
-            raise ValueError(
-                'Unable to query with a query filter that isn\'t a dict.')
-
-        data = {
-            'name': name,
-            'query': query_string,
-            'filter': query_filter,
-            'dsl': query_dsl,
-        }
-        response = self.api.session.post(resource_url, json=data)
-
-        status = error.check_return_status(response, logger)
-        if not status:
-            error.error_message(
-                response, 'Unable to create view', error=RuntimeError)
-
-        response_json = error.get_response_json(response, logger)
-        view_dict = response_json.get('objects', [{}])[0]
-        return view_lib.View(
-            view_id=view_dict.get('id'),
-            view_name=name,
-            sketch_id=self.id,
-            api=self.api)
+        search_obj = search.Search(sketch=self)
+        search_obj.from_manual(
+            query_string=query_string,
+            query_dsl=query_dsl,
+            query_filter=query_filter
+        )
+        search_obj.name = name
+        search_obj.save()
+        return search_obj
 
     def create_story(self, title):
         """Create a story object.
@@ -474,8 +588,7 @@ class Sketch(resource.BaseResource):
         for group_dict in data.get('objects', []):
             if not group_dict.get('id'):
                 continue
-            group = aggregation.AggregationGroup(
-                sketch=self, api=self.api)
+            group = aggregation.AggregationGroup(sketch=self)
             group.from_dict(group_dict)
             groups.append(group)
         return groups
@@ -538,11 +651,34 @@ class Sketch(resource.BaseResource):
                 if any(x in exclude_labels for x in labels):
                     continue
 
-            aggregation_obj = aggregation.Aggregation(
-                sketch=self, api=self.api)
-            aggregation_obj.from_store(aggregation_id=agg_id)
+            aggregation_obj = aggregation.Aggregation(sketch=self)
+            aggregation_obj.from_saved(aggregation_id=agg_id)
             aggregations.append(aggregation_obj)
         return aggregations
+
+    def list_graphs(self):
+        """Returns a list of stored graphs."""
+        if self.is_archived():
+            raise RuntimeError(
+                'Unable to list graphs on an archived sketch.')
+
+        resource_uri = (
+            f'{self.api.api_root}/sketches/{self.id}/graphs/')
+
+        response = self.api.session.get(resource_uri)
+        response_json = error.get_response_json(response, logger)
+        objects = response_json.get('objects')
+        if not objects:
+            logger.warning('No graphs discovered.')
+            return []
+
+        return_list = []
+        graph_list = objects[0]
+        for graph_dict in graph_list:
+            graph_obj = graph.Graph(sketch=self)
+            graph_obj.from_saved(graph_dict.get('id'))
+            return_list.append(graph_obj)
+        return return_list
 
     def get_analyzer_status(self, as_sessions=False):
         """Returns a list of started analyzers and their status.
@@ -618,7 +754,7 @@ class Sketch(resource.BaseResource):
         """Return a stored aggregation group.
 
         Args:
-            goup_id: id of the stored aggregation group.
+            group_id: id of the stored aggregation group.
 
         Returns:
             An aggregation group object (instance of AggregationGroup)
@@ -664,7 +800,23 @@ class Sketch(resource.BaseResource):
         return None
 
     def get_view(self, view_id=None, view_name=None):
-        """Returns a view object that is stored in the sketch.
+        """Returns a saved search object that is stored in the sketch.
+
+        Args:
+            view_id: an integer indicating the ID of the saved search to
+                be fetched. Defaults to None.
+            view_name: a string with the name of the saved search. Optional
+                and defaults to None.
+
+        Returns:
+            A search object (instance of search.Search) if one is found.
+            Returns a None if neiter view_id or view_name is defined or if
+            the search does not exist.
+        """
+        return self.get_saved_search(search_id=view_id, search_name=view_name)
+
+    def get_saved_search(self, search_id=None, search_name=None):
+        """Returns a saved search object that is stored in the sketch.
 
         Args:
             view_id: an integer indicating the ID of the view to
@@ -673,22 +825,22 @@ class Sketch(resource.BaseResource):
                 and defaults to None.
 
         Returns:
-            A view object (instance of View) if one is found. Returns
-            a None if neiter view_id or view_name is defined or if
-            the view does not exist.
+            A search object (instance of search.Search) if one is found.
+            Returns a None if neiter search_id or search_name is defined or if
+            the search does not exist.
         """
         if self.is_archived():
             raise RuntimeError(
-                'Unable to get views on an archived sketch.')
+                'Unable to get saved searches on an archived sketch.')
 
-        if view_id is None and view_name is None:
+        if search_id is None and search_name is None:
             return None
 
-        for view in self.list_views():
-            if view_id and view_id == view.id:
-                return view
-            if view_name and view_name.lower() == view.name.lower():
-                return view
+        for search_obj in self.list_saved_searches():
+            if search_id and search_id == search_obj.id:
+                return search_obj
+            if search_name and search_name.lower() == search_obj.name.lower():
+                return search_obj
         return None
 
     def list_stories(self):
@@ -724,22 +876,28 @@ class Sketch(resource.BaseResource):
         """List all saved views for this sketch.
 
         Returns:
-            List of views (instances of View objects)
+            List of search object (instance of search.Search).
+        """
+        return self.list_saved_searches()
+
+    def list_saved_searches(self):
+        """List all saved searches for this sketch.
+
+        Returns:
+            List of search object (instance of search.Search).
         """
         if self.is_archived():
             raise RuntimeError(
-                'Unable to list views on an archived sketch.')
+                'Unable to list saved searches on an archived sketch.')
 
         sketch = self.lazyload_data()
-        views = []
-        for view in sketch['meta'].get('views', []):
-            view_obj = view_lib.View(
-                view_id=view['id'],
-                view_name=view['name'],
-                sketch_id=self.id,
-                api=self.api)
-            views.append(view_obj)
-        return views
+        searches = []
+        for saved_search in sketch['meta'].get('views', []):
+            search_obj = search.Search(sketch=self)
+            search_obj.from_saved(saved_search.get('id'))
+            searches.append(search_obj)
+
+        return searches
 
     def list_timelines(self):
         """List all timelines for this sketch.
@@ -839,7 +997,8 @@ class Sketch(resource.BaseResource):
                 return_fields=None,
                 as_pandas=False,
                 max_entries=None,
-                file_name=''):
+                file_name='',
+                as_object=False):
         """Explore the sketch.
 
         Args:
@@ -861,10 +1020,14 @@ class Sketch(resource.BaseResource):
                 returned back as a dict or a pandas DataFrame. The ZIP file
                 will contain a METADATA file and a CSV with the results from
                 the query.
+            as_object (bool): Optional bool that determines whether the
+                function will return a search object back instead of raw
+                results.
 
         Returns:
-            Dictionary with query results or a pandas DataFrame if as_pandas
-            is set to True. If file_name is provided then no value will be
+            Dictionary with query results, a pandas DataFrame if as_pandas
+            is set to True or a search.Search object if as_object is set
+            to True. If file_name is provided then no value will be
             returned.
 
         Raises:
@@ -878,104 +1041,32 @@ class Sketch(resource.BaseResource):
         if self.is_archived():
             raise RuntimeError('Unable to query an archived sketch.')
 
-        if query_filter:
-            stop_size = query_filter.get('size', 0)
-            terminate_after = query_filter.get('size', 0)
-            if terminate_after and (terminate_after < stop_size):
-                stop_size = terminate_after
-
-            scrolling = bool(stop_size < self.DEFAULT_SIZE_LIMIT)
-        else:
-            scrolling = True
-            stop_size = 0
-            query_filter = {
-                'time_start': None,
-                'time_end': None,
-                'size': self.DEFAULT_SIZE_LIMIT,
-                'terminate_after': self.DEFAULT_SIZE_LIMIT,
-                'indices': '_all',
-                'order': 'asc'
-            }
-
-        if not isinstance(query_filter, dict):
-            raise ValueError(
-                'Unable to query with a query filter that isn\'t a dict.')
+        search_obj = search.Search(sketch=self)
 
         if view:
-            if view.query_string:
-                query_string = view.query_string
-            query_filter = view.query_filter
-            query_dsl = view.query_dsl
+            logger.warning(
+                'View objects will be deprecated soon, use search.Search '
+                'objects instead.')
+            search_obj.from_saved(view.id)
 
-        if as_pandas:
-            query_filter.setdefault('size', self.DEFAULT_SIZE_LIMIT)
-            query_filter.setdefault('terminate_after', self.DEFAULT_SIZE_LIMIT)
-
-        resource_url = '{0:s}/sketches/{1:d}/explore/'.format(
-            self.api.api_root, self.id)
-
-        form_data = {
-            'query': query_string,
-            'filter': query_filter,
-            'dsl': query_dsl,
-            'fields': return_fields,
-            'enable_scroll': scrolling,
-            'file_name': file_name,
-        }
-
-        response = self.api.session.post(resource_url, json=form_data)
-        if not error.check_return_status(response, logger):
-            error.error_message(
-                response, message='Unable to query results',
-                error=ValueError)
+        else:
+            search_obj.from_manual(
+                query_string=query_string,
+                query_dsl=query_dsl,
+                query_filter=query_filter,
+                return_fields=return_fields,
+                max_entries=max_entries
+            )
+        if as_object:
+            return search_obj
 
         if file_name:
-            with open(file_name, 'wb') as fw:
-                fw.write(response.content)
-            return True
-
-        response_json = error.get_response_json(response, logger)
-
-        scroll_id = response_json.get('meta', {}).get('scroll_id', '')
-        form_data['scroll_id'] = scroll_id
-
-        count = len(response_json.get('objects', []))
-        total_count = count
-        while count > 0:
-            if max_entries and total_count >= max_entries:
-                break
-            if stop_size and total_count >= stop_size:
-                break
-
-            if not scroll_id:
-                logger.debug('No scroll ID, will stop.')
-                break
-
-            more_response = self.api.session.post(resource_url, json=form_data)
-            if not error.check_return_status(more_response, logger):
-                error.error_message(
-                    response, message='Unable to query results',
-                    error=ValueError)
-            more_response_json = error.get_response_json(more_response, logger)
-            count = len(more_response_json.get('objects', []))
-            total_count += count
-            response_json['objects'].extend(
-                more_response_json.get('objects', []))
-            more_meta = more_response_json.get('meta', {})
-            added_time = more_meta.get('es_time', 0)
-            response_json['meta']['es_time'] += added_time
-
-        total_elastic_count = response_json.get(
-            'meta', {}).get('es_total_count', 0)
-        if total_elastic_count != total_count:
-            logger.info(
-                '{0:d} results were returned, but {1:d} records matched the '
-                'search query'.format(total_count, total_elastic_count))
+            return search_obj.to_file(file_name)
 
         if as_pandas:
-            return self._build_pandas_dataframe(response_json, return_fields)
+            return search_obj.to_pandas()
 
-        return response_json
+        return search_obj.to_dict()
 
     def list_available_analyzers(self):
         """Returns a list of available analyzers."""
@@ -1020,20 +1111,6 @@ class Sketch(resource.BaseResource):
                 'Unable to run analyzer, need to define either '
                 'timeline ID or name')
 
-        resource_url = '{0:s}/sketches/{1:d}/analyzer/'.format(
-            self.api.api_root, self.id)
-
-        # The analyzer_kwargs is expected to be a dict with the key
-        # being the analyzer name, and the value being the key/value dict
-        # with parameters for the analyzer.
-        if analyzer_kwargs:
-            if not isinstance(analyzer_kwargs, dict):
-                raise error.UnableToRunAnalyzer(
-                    'Unable to run analyzer, analyzer kwargs needs to be a '
-                    'dict')
-            if analyzer_name not in analyzer_kwargs:
-                analyzer_kwargs = {analyzer_name: analyzer_kwargs}
-
         if timeline_name:
             sketch = self.lazyload_data(refresh_cache=True)
             timelines = []
@@ -1055,35 +1132,17 @@ class Sketch(resource.BaseResource):
 
             timeline_id = timelines[0]
 
-        data = {
-            'timeline_id': timeline_id,
-            'analyzer_names': [analyzer_name],
-            'analyzer_kwargs': analyzer_kwargs,
-        }
-
-        response = self.api.session.post(resource_url, json=data)
-
-        if not error.check_return_status(response, logger):
-            raise error.UnableToRunAnalyzer('[{0:d}] {1!s} {2!s}'.format(
-                response.status_code, response.reason, response.text))
-
-        data = error.get_response_json(response, logger)
-        objects = data.get('objects', [])
-        if not objects:
+        if not timeline_id:
             raise error.UnableToRunAnalyzer(
-                'No session data returned back, analyzer may have run but '
-                'unable to verify, please verify manually.')
+                'Unable to run an analyzer, not able to find a timeline.')
 
-        session_id = objects[0].get('analysis_session')
-        if not session_id:
-            raise error.UnableToRunAnalyzer(
-                'Analyzer may have run, but there is no session ID to '
-                'verify that it has. Please verify manually.')
+        timeline_obj = timeline.Timeline(
+            timeline_id=timeline_id,
+            sketch_id=self.id,
+            api=self.api)
 
-        session = analyzer.AnalyzerResult(
-            timeline_id=timeline_id, session_id=session_id,
-            sketch_id=self.id, api=self.api)
-        return session
+        return timeline_obj.run_analyzer(
+            analyzer_name=analyzer_name, analyzer_kwargs=analyzer_kwargs)
 
     def remove_acl(
             self, user_list=None, group_list=None, remove_public=False,
@@ -1155,8 +1214,8 @@ class Sketch(resource.BaseResource):
             raise RuntimeError(
                 'You need to supply an aggregation query DSL string.')
 
-        aggregation_obj = aggregation.Aggregation(sketch=self, api=self.api)
-        aggregation_obj.from_explore(aggregate_dsl)
+        aggregation_obj = aggregation.Aggregation(sketch=self)
+        aggregation_obj.from_manual(aggregate_dsl)
 
         return aggregation_obj
 
@@ -1197,9 +1256,7 @@ class Sketch(resource.BaseResource):
             raise RuntimeError(
                 'Unable to run an aggregator on an archived sketch.')
 
-        aggregation_obj = aggregation.Aggregation(
-            sketch=self,
-            api=self.api)
+        aggregation_obj = aggregation.Aggregation(sketch=self)
         aggregation_obj.from_aggregator_run(
             aggregator_name=aggregator_name,
             aggregator_parameters=aggregator_parameters
